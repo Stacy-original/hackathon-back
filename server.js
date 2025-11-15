@@ -1,4 +1,4 @@
-// server.js
+// server.js - COMPLETE FIXED VERSION
 const express = require('express');
 const cors = require('cors');
 const fs = require('fs').promises;
@@ -42,6 +42,31 @@ const writeReports = async (reports) => {
   await fs.writeFile(DATA_FILE, JSON.stringify(reports, null, 2));
 };
 
+// ✅ ROOT ROUTE - Add this!
+app.get('/', (req, res) => {
+  res.json({ 
+    message: '🚀 SKO GeoHydro Portal API is running!',
+    version: '1.0.0',
+    endpoints: {
+      health: '/health',
+      getAllReports: '/api/reports (GET)',
+      submitReport: '/api/reports (POST)',
+      updateReport: '/api/reports/:id (PUT)',
+      deleteReport: '/api/reports/:id (DELETE)'
+    },
+    timestamp: new Date().toISOString()
+  });
+});
+
+// ✅ HEALTH CHECK ROUTE - Add this!
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'OK',
+    server: 'running',
+    timestamp: new Date().toISOString()
+  });
+});
+
 // API Routes
 
 // Get all reports (for admin)
@@ -75,12 +100,12 @@ app.post('/api/reports', async (req, res) => {
       severity: severity || 'medium',
       email: email || '',
       phone: phone || '',
-      status: 'pending', // pending, reviewed, resolved
+      status: 'pending',
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
 
-    reports.unshift(newReport); // Add to beginning
+    reports.unshift(newReport);
     await writeReports(reports);
 
     res.status(201).json({ 
@@ -141,11 +166,8 @@ app.delete('/api/reports/:id', async (req, res) => {
   }
 });
 
-// Health check
-app.get('/health', (req, res) => {
-  res.json({ status: 'OK', timestamp: new Date().toISOString() });
-});
-
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`📍 Local: http://localhost:${PORT}`);
+  console.log(`🌐 Health: http://0.0.0.0:${PORT}/health`);
 });
