@@ -1,4 +1,3 @@
-// server.js - COMPLETE FIXED VERSION
 const express = require('express');
 const cors = require('cors');
 const fs = require('fs').promises;
@@ -11,16 +10,17 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
-// Data file path
-const DATA_FILE = path.join(__dirname, 'data', 'reports.json');
+// Use Render's persistent file system - /tmp directory persists between deploys
+const DATA_DIR = '/tmp/skogeohydro-data';
+const DATA_FILE = path.join(DATA_DIR, 'reports.json');
 
 // Ensure data directory exists
 const ensureDataDirectory = async () => {
-  const dataDir = path.dirname(DATA_FILE);
   try {
-    await fs.access(dataDir);
+    await fs.access(DATA_DIR);
   } catch {
-    await fs.mkdir(dataDir, { recursive: true });
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    console.log('✅ Created data directory:', DATA_DIR);
   }
 };
 
@@ -29,9 +29,10 @@ const readReports = async () => {
   try {
     await ensureDataDirectory();
     const data = await fs.readFile(DATA_FILE, 'utf8');
+    console.log('📁 Loaded data from file');
     return JSON.parse(data);
   } catch (error) {
-    // Return empty array if file doesn't exist
+    console.log('📁 No data file found, starting fresh');
     return [];
   }
 };
@@ -40,36 +41,12 @@ const readReports = async () => {
 const writeReports = async (reports) => {
   await ensureDataDirectory();
   await fs.writeFile(DATA_FILE, JSON.stringify(reports, null, 2));
+  console.log('💾 Saved data to file');
 };
-
-// ✅ ROOT ROUTE - Add this!
-app.get('/', (req, res) => {
-  res.json({ 
-    message: '🚀 SKO GeoHydro Portal API is running!',
-    version: '1.0.0',
-    endpoints: {
-      health: '/health',
-      getAllReports: '/api/reports (GET)',
-      submitReport: '/api/reports (POST)',
-      updateReport: '/api/reports/:id (PUT)',
-      deleteReport: '/api/reports/:id (DELETE)'
-    },
-    timestamp: new Date().toISOString()
-  });
-});
-
-// ✅ HEALTH CHECK ROUTE - Add this!
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'OK',
-    server: 'running',
-    timestamp: new Date().toISOString()
-  });
-});
 
 // API Routes
 
-// Get all reports (for admin)
+// Get all reports
 app.get('/api/reports', async (req, res) => {
   try {
     const reports = await readReports();
@@ -84,7 +61,6 @@ app.post('/api/reports', async (req, res) => {
   try {
     const { type, location, coordinates, description, severity, email, phone } = req.body;
     
-    // Basic validation
     if (!type || !location || !description) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
@@ -117,7 +93,7 @@ app.post('/api/reports', async (req, res) => {
   }
 });
 
-// Update report status (for admin)
+// Update report status
 app.put('/api/reports/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -148,7 +124,7 @@ app.put('/api/reports/:id', async (req, res) => {
   }
 });
 
-// Delete report (for admin)
+// Delete report
 app.delete('/api/reports/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -166,8 +142,27 @@ app.delete('/api/reports/:id', async (req, res) => {
   }
 });
 
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'OK', 
+    timestamp: new Date().toISOString(),
+    dataDirectory: DATA_DIR
+  });
+});
+
+// Root route
+app.get('/', (req, res) => {
+  res.json({ 
+    message: 'SKO GeoHydro Portal API',
+    version: '1.0.0',
+    dataPersists: true,
+    timestamp: new Date().toISOString()
+  });
+});
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Server running on port ${PORT}`);
-  console.log(`📍 Local: http://localhost:${PORT}`);
-  console.log(`🌐 Health: http://0.0.0.0:${PORT}/health`);
+  console.log(`📁 Data directory: ${DATA_DIR}`);
+  console.log(`🌐 Health check: http://0.0.0.0:${PORT}/health`);
 });
