@@ -15,22 +15,38 @@ let client;
 
 const connectDB = async () => {
   try {
-    // ✅ SAFE - Only use environment variable
+    console.log('🔗 Attempting to connect to MongoDB...');
+    
     const uri = process.env.MONGODB_URI;
     
-    client = new MongoClient(uri);
+    if (!uri) {
+      throw new Error('❌ MONGODB_URI environment variable is missing. Please set it in Render environment variables.');
+    }
+    
+    console.log('📡 Connection string loaded');
+    
+    client = new MongoClient(uri, {
+      serverSelectionTimeoutMS: 30000,
+      connectTimeoutMS: 30000,
+      socketTimeoutMS: 45000,
+      maxPoolSize: 10,
+      retryWrites: true,
+      retryReads: true
+    });
     
     await client.connect();
+    console.log('✅ MongoDB client connected');
     
-    // Database name - using 'skogeohydro'
     db = client.db('skogeohydro');
+    console.log('📊 Database: skogeohydro selected');
     
-    console.log('✅ MongoDB Connected Successfully');
-    console.log('📊 Database: skogeohydro');
+    // Test the connection
+    await db.command({ ping: 1 });
+    console.log('✅ MongoDB ping successful');
     
     return db;
   } catch (error) {
-    console.error('❌ Database connection error:', error);
+    console.error('❌ Database connection failed:', error.message);
     process.exit(1);
   }
 };
@@ -89,7 +105,6 @@ app.post('/api/reports', async (req, res) => {
 
     const result = await collection.insertOne(newReport);
     
-    // Add the generated MongoDB ID to the response
     const savedReport = {
       ...newReport,
       _id: result.insertedId
@@ -167,7 +182,6 @@ app.delete('/api/reports/:id', async (req, res) => {
 app.get('/health', async (req, res) => {
   try {
     const database = getDB();
-    // Test the connection
     await database.command({ ping: 1 });
     
     res.json({ 
