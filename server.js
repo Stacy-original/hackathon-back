@@ -1,7 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const fs = require('fs').promises;
-const path = require('path');
+const { MongoClient, ObjectId } = require('mongodb');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -10,38 +9,39 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
-// Use Render's persistent file system - /tmp directory persists between deploys
-const DATA_DIR = '/tmp/skogeohydro-data';
-const DATA_FILE = path.join(DATA_DIR, 'reports.json');
+// MongoDB connection
+let db;
+let client;
 
-// Ensure data directory exists
-const ensureDataDirectory = async () => {
+const connectDB = async () => {
   try {
-    await fs.access(DATA_DIR);
-  } catch {
-    await fs.mkdir(DATA_DIR, { recursive: true });
-    console.log('✅ Created data directory:', DATA_DIR);
-  }
-};
-
-// Read reports from file
-const readReports = async () => {
-  try {
-    await ensureDataDirectory();
-    const data = await fs.readFile(DATA_FILE, 'utf8');
-    console.log('📁 Loaded data from file');
-    return JSON.parse(data);
+    // ⭐⭐⭐ PUT YOUR CONNECTION STRING HERE ⭐⭐⭐
+    // Replace everything after MONGODB_URI= with your actual connection string
+    const uri = process.env.MONGODB_URI || "mongodb+srv://filippstas337_db_user:6hRuCVeXKyWRxr95@backendsupport.ocdq3of.mongodb.net/?appName=backendsupport";
+    
+    client = new MongoClient(uri);
+    
+    await client.connect();
+    
+    // Database name - using 'skogeohydro'
+    db = client.db('skogeohydro');
+    
+    console.log('✅ MongoDB Connected Successfully');
+    console.log('📊 Database: skogeohydro');
+    
+    return db;
   } catch (error) {
-    console.log('📁 No data file found, starting fresh');
-    return [];
+    console.error('❌ Database connection error:', error);
+    process.exit(1);
   }
 };
 
-// Write reports to file
-const writeReports = async (reports) => {
-  await ensureDataDirectory();
-  await fs.writeFile(DATA_FILE, JSON.stringify(reports, null, 2));
-  console.log('💾 Saved data to file');
+// Get the database instance
+const getDB = () => {
+  if (!db) {
+    throw new Error('Database not connected. Call connectDB first.');
+  }
+  return db;
 };
 
 // API Routes
@@ -49,9 +49,16 @@ const writeReports = async (reports) => {
 // Get all reports
 app.get('/api/reports', async (req, res) => {
   try {
-    const reports = await readReports();
+    const database = getDB();
+    const collection = database.collection('reports');
+    
+    const reports = await collection.find({})
+      .sort({ createdAt: -1 })
+      .toArray();
+    
     res.json(reports);
   } catch (error) {
+    console.error('Error fetching reports:', error);
     res.status(500).json({ error: 'Failed to fetch reports' });
   }
 });
@@ -65,10 +72,10 @@ app.post('/api/reports', async (req, res) => {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    const reports = await readReports();
+    const database = getDB();
+    const collection = database.collection('reports');
     
     const newReport = {
-      id: Date.now().toString(),
       type,
       location,
       coordinates: coordinates || '',
@@ -81,14 +88,20 @@ app.post('/api/reports', async (req, res) => {
       updatedAt: new Date().toISOString()
     };
 
-    reports.unshift(newReport);
-    await writeReports(reports);
+    const result = await collection.insertOne(newReport);
+    
+    // Add the generated MongoDB ID to the response
+    const savedReport = {
+      ...newReport,
+      _id: result.insertedId
+    };
 
     res.status(201).json({ 
       message: 'Report submitted successfully',
-      report: newReport 
+      report: savedReport 
     });
   } catch (error) {
+    console.error('Error submitting report:', error);
     res.status(500).json({ error: 'Failed to submit report' });
   }
 });
@@ -103,23 +116,30 @@ app.put('/api/reports/:id', async (req, res) => {
       return res.status(400).json({ error: 'Invalid status' });
     }
 
-    const reports = await readReports();
-    const reportIndex = reports.findIndex(report => report.id === id);
+    const database = getDB();
+    const collection = database.collection('reports');
+    
+    const result = await collection.findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { 
+        $set: { 
+          status: status,
+          updatedAt: new Date().toISOString()
+        } 
+      },
+      { returnDocument: 'after' }
+    );
 
-    if (reportIndex === -1) {
+    if (!result.value) {
       return res.status(404).json({ error: 'Report not found' });
     }
 
-    reports[reportIndex].status = status;
-    reports[reportIndex].updatedAt = new Date().toISOString();
-    
-    await writeReports(reports);
-
     res.json({ 
       message: 'Report updated successfully',
-      report: reports[reportIndex]
+      report: result.value
     });
   } catch (error) {
+    console.error('Error updating report:', error);
     res.status(500).json({ error: 'Failed to update report' });
   }
 });
@@ -128,27 +148,41 @@ app.put('/api/reports/:id', async (req, res) => {
 app.delete('/api/reports/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const reports = await readReports();
-    const filteredReports = reports.filter(report => report.id !== id);
+    const database = getDB();
+    const collection = database.collection('reports');
+    
+    const result = await collection.deleteOne({ _id: new ObjectId(id) });
 
-    if (reports.length === filteredReports.length) {
+    if (result.deletedCount === 0) {
       return res.status(404).json({ error: 'Report not found' });
     }
 
-    await writeReports(filteredReports);
     res.json({ message: 'Report deleted successfully' });
   } catch (error) {
+    console.error('Error deleting report:', error);
     res.status(500).json({ error: 'Failed to delete report' });
   }
 });
 
-// Health check
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    timestamp: new Date().toISOString(),
-    dataDirectory: DATA_DIR
-  });
+// Health check with database connection test
+app.get('/health', async (req, res) => {
+  try {
+    const database = getDB();
+    // Test the connection
+    await database.command({ ping: 1 });
+    
+    res.json({ 
+      status: 'OK', 
+      database: 'Connected',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      status: 'ERROR', 
+      database: 'Disconnected',
+      error: error.message 
+    });
+  }
 });
 
 // Root route
@@ -156,13 +190,18 @@ app.get('/', (req, res) => {
   res.json({ 
     message: 'SKO GeoHydro Portal API',
     version: '1.0.0',
-    dataPersists: true,
+    database: 'MongoDB',
     timestamp: new Date().toISOString()
   });
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ Server running on port ${PORT}`);
-  console.log(`📁 Data directory: ${DATA_DIR}`);
-  console.log(`🌐 Health check: http://0.0.0.0:${PORT}/health`);
+// Connect to database and start server
+connectDB().then(() => {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`✅ Server running on port ${PORT}`);
+    console.log(`📊 Database: MongoDB Atlas`);
+    console.log(`🌐 Health check: http://0.0.0.0:${PORT}/health`);
+  });
+}).catch(error => {
+  console.error('❌ Failed to start server:', error);
 });
