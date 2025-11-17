@@ -15,9 +15,8 @@ let client;
 
 const connectDB = async () => {
   try {
-    // ⭐⭐⭐ PUT YOUR CONNECTION STRING HERE ⭐⭐⭐
-    // Replace everything after MONGODB_URI= with your actual connection string
-    const uri = process.env.MONGODB_URI || "mongodb+srv://filippstas337_db_user:6hRuCVeXKyWRxr95@backendsupport.ocdq3of.mongodb.net/?appName=backendsupport";
+    // ✅ SAFE - Only use environment variable
+    const uri = process.env.MONGODB_URI;
     
     client = new MongoClient(uri);
     
