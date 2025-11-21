@@ -1,7 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const fs = require('fs').promises;
-const path = require('path');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -10,49 +9,52 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
-// Use Render's persistent file system - /tmp directory persists between deploys
-const DATA_DIR = '/tmp/skogeohydro-data';
-const REPORTS_FILE = path.join(DATA_DIR, 'reports.json');
-const COORDINATES_FILE = path.join(DATA_DIR, 'coordinates.json');
+// MongoDB Atlas connection string - replace with your actual credentials
+const MONGODB_URI = "mongodb+srv://kasyak-render:kasyak-database-password@hackathon-data.uo8k8xi.mongodb.net/?appName=hackathon-data";
 
-// Ensure data directory exists
-const ensureDataDirectory = async () => {
-  try {
-    await fs.access(DATA_DIR);
-  } catch {
-    await fs.mkdir(DATA_DIR, { recursive: true });
-    console.log('✅ Created data directory:', DATA_DIR);
+// Create a MongoClient with Stable API configuration
+const client = new MongoClient(MONGODB_URI, {
+  serverApi: {
+    version: ServerApiVersion.v1,
+    strict: true,
+    deprecationErrors: true,
   }
-};
+});
 
-// Read data from file (generic function)
-const readData = async (filePath, defaultValue = []) => {
+// Database and Collection Names
+const DB_NAME = 'skogeohydro';
+const REPORTS_COLLECTION = 'reports';
+const COORDINATES_COLLECTION = 'coordinates';
+
+// Connect to MongoDB once when the server starts
+async function connectToDatabase() {
   try {
-    await ensureDataDirectory();
-    const data = await fs.readFile(filePath, 'utf8');
-    console.log(`📁 Loaded data from ${filePath}`);
-    return JSON.parse(data);
+    await client.connect();
+    console.log("✅ Successfully connected to MongoDB Atlas!");
+    
+    // Send a ping to confirm a successful connection
+    await client.db("admin").command({ ping: 1 });
+    console.log("Pinged your deployment. Connection is stable.");
   } catch (error) {
-    console.log(`📁 No data file found at ${filePath}, starting fresh`);
-    return defaultValue;
+    console.error("❌ Failed to connect to MongoDB", error);
+    process.exit(1); // Stop the server if connection fails
   }
-};
+}
 
-// Write data to file (generic function)
-const writeData = async (filePath, data) => {
-  await ensureDataDirectory();
-  await fs.writeFile(filePath, JSON.stringify(data, null, 2));
-  console.log(`💾 Saved data to ${filePath}`);
-};
+// Call the connection function
+connectToDatabase();
 
 // REPORTS API ROUTES
 
 // Get all reports
 app.get('/api/reports', async (req, res) => {
   try {
-    const reports = await readData(REPORTS_FILE);
-    res.json(reports);
+    const database = client.db(DB_NAME);
+    const reports = database.collection(REPORTS_COLLECTION);
+    const allReports = await reports.find({}).sort({ createdAt: -1 }).toArray();
+    res.json(allReports);
   } catch (error) {
+    console.error('Error fetching reports:', error);
     res.status(500).json({ error: 'Failed to fetch reports' });
   }
 });
@@ -66,10 +68,10 @@ app.post('/api/reports', async (req, res) => {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    const reports = await readData(REPORTS_FILE);
+    const database = client.db(DB_NAME);
+    const reports = database.collection(REPORTS_COLLECTION);
     
     const newReport = {
-      id: Date.now().toString(),
       type,
       location,
       coordinates: coordinates || '',
@@ -78,18 +80,19 @@ app.post('/api/reports', async (req, res) => {
       email: email || '',
       phone: phone || '',
       status: 'pending',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      createdAt: new Date(),
+      updatedAt: new Date()
     };
 
-    reports.unshift(newReport);
-    await writeData(REPORTS_FILE, reports);
+    const result = await reports.insertOne(newReport);
+    newReport._id = result.insertedId;
 
     res.status(201).json({ 
       message: 'Report submitted successfully',
       report: newReport 
     });
   } catch (error) {
+    console.error('Error submitting report:', error);
     res.status(500).json({ error: 'Failed to submit report' });
   }
 });
@@ -104,23 +107,26 @@ app.put('/api/reports/:id', async (req, res) => {
       return res.status(400).json({ error: 'Invalid status' });
     }
 
-    const reports = await readData(REPORTS_FILE);
-    const reportIndex = reports.findIndex(report => report.id === id);
+    const database = client.db(DB_NAME);
+    const reports = database.collection(REPORTS_COLLECTION);
 
-    if (reportIndex === -1) {
+    const result = await reports.updateOne(
+      { _id: new ObjectId(id) },
+      { 
+        $set: { 
+          status: status,
+          updatedAt: new Date()
+        } 
+      }
+    );
+
+    if (result.matchedCount === 0) {
       return res.status(404).json({ error: 'Report not found' });
     }
 
-    reports[reportIndex].status = status;
-    reports[reportIndex].updatedAt = new Date().toISOString();
-    
-    await writeData(REPORTS_FILE, reports);
-
-    res.json({ 
-      message: 'Report updated successfully',
-      report: reports[reportIndex]
-    });
+    res.json({ message: 'Report updated successfully' });
   } catch (error) {
+    console.error('Error updating report:', error);
     res.status(500).json({ error: 'Failed to update report' });
   }
 });
@@ -129,16 +135,18 @@ app.put('/api/reports/:id', async (req, res) => {
 app.delete('/api/reports/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const reports = await readData(REPORTS_FILE);
-    const filteredReports = reports.filter(report => report.id !== id);
+    const database = client.db(DB_NAME);
+    const reports = database.collection(REPORTS_COLLECTION);
 
-    if (reports.length === filteredReports.length) {
+    const result = await reports.deleteOne({ _id: new ObjectId(id) });
+
+    if (result.deletedCount === 0) {
       return res.status(404).json({ error: 'Report not found' });
     }
 
-    await writeData(REPORTS_FILE, filteredReports);
     res.json({ message: 'Report deleted successfully' });
   } catch (error) {
+    console.error('Error deleting report:', error);
     res.status(500).json({ error: 'Failed to delete report' });
   }
 });
@@ -148,9 +156,12 @@ app.delete('/api/reports/:id', async (req, res) => {
 // Get all coordinates
 app.get('/api/coordinates', async (req, res) => {
   try {
-    const coordinates = await readData(COORDINATES_FILE);
-    res.json(coordinates);
+    const database = client.db(DB_NAME);
+    const coordinates = database.collection(COORDINATES_COLLECTION);
+    const allCoordinates = await coordinates.find({}).sort({ createdAt: -1 }).toArray();
+    res.json(allCoordinates);
   } catch (error) {
+    console.error('Error fetching coordinates:', error);
     res.status(500).json({ error: 'Failed to fetch coordinates' });
   }
 });
@@ -164,10 +175,10 @@ app.post('/api/coordinates', async (req, res) => {
       return res.status(400).json({ error: 'Missing required fields: name, lat, lng' });
     }
 
-    const coordinates = await readData(COORDINATES_FILE);
+    const database = client.db(DB_NAME);
+    const coordinates = database.collection(COORDINATES_COLLECTION);
     
     const newCoordinate = {
-      id: Date.now().toString(),
       name,
       lat: parseFloat(lat),
       lng: parseFloat(lng),
@@ -178,18 +189,19 @@ app.post('/api/coordinates', async (req, res) => {
       pathogens: pathogens || 'Unknown',
       description: description || '',
       status: 'pending',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
+      createdAt: new Date(),
+      updatedAt: new Date()
     };
 
-    coordinates.unshift(newCoordinate);
-    await writeData(COORDINATES_FILE, coordinates);
+    const result = await coordinates.insertOne(newCoordinate);
+    newCoordinate._id = result.insertedId;
 
     res.status(201).json({ 
       message: 'Coordinates submitted successfully',
       coordinate: newCoordinate 
     });
   } catch (error) {
+    console.error('Error submitting coordinates:', error);
     res.status(500).json({ error: 'Failed to submit coordinates' });
   }
 });
@@ -204,23 +216,28 @@ app.put('/api/coordinates/:id', async (req, res) => {
       return res.status(400).json({ error: 'Invalid status' });
     }
 
-    const coordinates = await readData(COORDINATES_FILE);
-    const coordinateIndex = coordinates.findIndex(coord => coord.id === id);
+    const database = client.db(DB_NAME);
+    const coordinates = database.collection(COORDINATES_COLLECTION);
 
-    if (coordinateIndex === -1) {
+    const result = await coordinates.updateOne(
+      { _id: new ObjectId(id) },
+      { 
+        $set: { 
+          status: status,
+          updatedAt: new Date()
+        } 
+      }
+    );
+
+    if (result.matchedCount === 0) {
       return res.status(404).json({ error: 'Coordinate not found' });
     }
 
-    coordinates[coordinateIndex].status = status;
-    coordinates[coordinateIndex].updatedAt = new Date().toISOString();
-    
-    await writeData(COORDINATES_FILE, coordinates);
-
     res.json({ 
-      message: 'Coordinate updated successfully',
-      coordinate: coordinates[coordinateIndex]
+      message: 'Coordinate updated successfully'
     });
   } catch (error) {
+    console.error('Error updating coordinate:', error);
     res.status(500).json({ error: 'Failed to update coordinate' });
   }
 });
@@ -229,27 +246,39 @@ app.put('/api/coordinates/:id', async (req, res) => {
 app.delete('/api/coordinates/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const coordinates = await readData(COORDINATES_FILE);
-    const filteredCoordinates = coordinates.filter(coord => coord.id !== id);
+    const database = client.db(DB_NAME);
+    const coordinates = database.collection(COORDINATES_COLLECTION);
 
-    if (coordinates.length === filteredCoordinates.length) {
+    const result = await coordinates.deleteOne({ _id: new ObjectId(id) });
+
+    if (result.deletedCount === 0) {
       return res.status(404).json({ error: 'Coordinate not found' });
     }
 
-    await writeData(COORDINATES_FILE, filteredCoordinates);
     res.json({ message: 'Coordinate deleted successfully' });
   } catch (error) {
+    console.error('Error deleting coordinate:', error);
     res.status(500).json({ error: 'Failed to delete coordinate' });
   }
 });
 
 // Health check
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    timestamp: new Date().toISOString(),
-    dataDirectory: DATA_DIR
-  });
+app.get('/health', async (req, res) => {
+  try {
+    await client.db("admin").command({ ping: 1 });
+    res.json({ 
+      status: 'OK', 
+      timestamp: new Date().toISOString(),
+      database: 'Connected to MongoDB Atlas'
+    });
+  } catch (error) {
+    console.error('Health check failed:', error);
+    res.status(500).json({ 
+      status: 'Database Error', 
+      timestamp: new Date().toISOString(),
+      database: 'Disconnected'
+    });
+  }
 });
 
 // Root route
@@ -257,13 +286,20 @@ app.get('/', (req, res) => {
   res.json({ 
     message: 'SKO GeoHydro Portal API',
     version: '1.0.0',
-    dataPersists: true,
+    database: 'MongoDB Atlas',
     timestamp: new Date().toISOString()
   });
 });
 
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('Shutting down gracefully...');
+  await client.close();
+  process.exit(0);
+});
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Server running on port ${PORT}`);
-  console.log(`📁 Data directory: ${DATA_DIR}`);
+  console.log(`📁 Connected to MongoDB Atlas: hackathon-data.uo8k8xi.mongodb.net`);
   console.log(`🌐 Health check: http://0.0.0.0:${PORT}/health`);
 });
