@@ -7,7 +7,7 @@ const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' })); // Increased limit for image uploads
 
 // MongoDB Atlas connection string - replace with your actual credentials
 const MONGODB_URI = "mongodb+srv://kasyak-render:kasyak-database-password@hackathon-data.uo8k8xi.mongodb.net/?appName=hackathon-data";
@@ -25,6 +25,7 @@ const client = new MongoClient(MONGODB_URI, {
 const DB_NAME = 'skogeohydro';
 const REPORTS_COLLECTION = 'reports';
 const COORDINATES_COLLECTION = 'coordinates';
+const POSTS_COLLECTION = 'posts';
 
 // Connect to MongoDB once when the server starts
 async function connectToDatabase() {
@@ -262,6 +263,183 @@ app.delete('/api/coordinates/:id', async (req, res) => {
   }
 });
 
+// POSTS API ROUTES
+
+// Get all posts (for admin)
+app.get('/api/posts', async (req, res) => {
+  try {
+    const database = client.db(DB_NAME);
+    const posts = database.collection(POSTS_COLLECTION);
+    const allPosts = await posts.find({}).sort({ createdAt: -1 }).toArray();
+    res.json(allPosts);
+  } catch (error) {
+    console.error('Error fetching posts:', error);
+    res.status(500).json({ error: 'Failed to fetch posts' });
+  }
+});
+
+// Get approved posts for feed
+app.get('/api/posts/feed', async (req, res) => {
+  try {
+    const database = client.db(DB_NAME);
+    const posts = database.collection(POSTS_COLLECTION);
+    const approvedPosts = await posts.find({ status: 'approved' }).sort({ createdAt: -1 }).toArray();
+    res.json(approvedPosts);
+  } catch (error) {
+    console.error('Error fetching feed posts:', error);
+    res.status(500).json({ error: 'Failed to fetch feed posts' });
+  }
+});
+
+// Get single post by ID
+app.get('/api/posts/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const database = client.db(DB_NAME);
+    const posts = database.collection(POSTS_COLLECTION);
+
+    const post = await posts.findOne({ _id: new ObjectId(id) });
+
+    if (!post) {
+      return res.status(404).json({ error: 'Post not found' });
+    }
+
+    res.json(post);
+  } catch (error) {
+    console.error('Error fetching post:', error);
+    res.status(500).json({ error: 'Failed to fetch post' });
+  }
+});
+
+// Create new post
+app.post('/api/posts', async (req, res) => {
+  try {
+    const { 
+      title, 
+      content, 
+      description, 
+      severity, 
+      type, 
+      location, 
+      imageUrl, 
+      videoUrl, 
+      status = 'pending',
+      tags = []
+    } = req.body;
+    
+    if (!title || !content) {
+      return res.status(400).json({ error: 'Missing required fields: title, content' });
+    }
+
+    const database = client.db(DB_NAME);
+    const posts = database.collection(POSTS_COLLECTION);
+    
+    const newPost = {
+      title,
+      content,
+      description: description || '',
+      severity: severity || 'medium',
+      type: type || 'news',
+      location: location || '',
+      imageUrl: imageUrl || '',
+      videoUrl: videoUrl || '',
+      tags: Array.isArray(tags) ? tags : [tags],
+      status: status,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      publishedAt: status === 'approved' ? new Date() : null
+    };
+
+    const result = await posts.insertOne(newPost);
+    newPost._id = result.insertedId;
+
+    res.status(201).json({ 
+      message: 'Post created successfully',
+      post: newPost 
+    });
+  } catch (error) {
+    console.error('Error creating post:', error);
+    res.status(500).json({ error: 'Failed to create post' });
+  }
+});
+
+// Update post status (approve/reject)
+app.put('/api/posts/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { 
+      title, 
+      content, 
+      description, 
+      severity, 
+      type, 
+      location, 
+      imageUrl, 
+      videoUrl, 
+      status,
+      tags 
+    } = req.body;
+
+    const database = client.db(DB_NAME);
+    const posts = database.collection(POSTS_COLLECTION);
+
+    const updateData = {
+      updatedAt: new Date()
+    };
+
+    if (title !== undefined) updateData.title = title;
+    if (content !== undefined) updateData.content = content;
+    if (description !== undefined) updateData.description = description;
+    if (severity !== undefined) updateData.severity = severity;
+    if (type !== undefined) updateData.type = type;
+    if (location !== undefined) updateData.location = location;
+    if (imageUrl !== undefined) updateData.imageUrl = imageUrl;
+    if (videoUrl !== undefined) updateData.videoUrl = videoUrl;
+    if (tags !== undefined) updateData.tags = Array.isArray(tags) ? tags : [tags];
+    
+    if (status !== undefined) {
+      updateData.status = status;
+      if (status === 'approved' && !req.body.publishedAt) {
+        updateData.publishedAt = new Date();
+      }
+    }
+
+    const result = await posts.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updateData }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: 'Post not found' });
+    }
+
+    res.json({ message: 'Post updated successfully' });
+  } catch (error) {
+    console.error('Error updating post:', error);
+    res.status(500).json({ error: 'Failed to update post' });
+  }
+});
+
+// Delete post
+app.delete('/api/posts/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const database = client.db(DB_NAME);
+    const posts = database.collection(POSTS_COLLECTION);
+
+    const result = await posts.deleteOne({ _id: new ObjectId(id) });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ error: 'Post not found' });
+    }
+
+    res.json({ message: 'Post deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting post:', error);
+    res.status(500).json({ error: 'Failed to delete post' });
+  }
+});
+
 // Health check
 app.get('/health', async (req, res) => {
   try {
@@ -302,4 +480,6 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`✅ Server running on port ${PORT}`);
   console.log(`📁 Connected to MongoDB Atlas: hackathon-data.uo8k8xi.mongodb.net`);
   console.log(`🌐 Health check: http://0.0.0.0:${PORT}/health`);
+  console.log(`📝 Posts API available at: http://0.0.0.0:${PORT}/api/posts`);
+  console.log(`📰 Feed API available at: http://0.0.0.0:${PORT}/api/posts/feed`);
 });
