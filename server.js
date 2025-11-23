@@ -12,22 +12,46 @@ const PORT = process.env.PORT || 3001;
 // MIDDLEWARE CONFIGURATION
 // =============================================
 
-// CORS configuration
+// Enhanced CORS configuration for cross-domain
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
-  credentials: true
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    const allowedOrigins = [
+      'https://hackathon-one-blue.vercel.app',
+      'http://localhost:3000',
+      'http://localhost:3001'
+    ];
+    
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      return callback(null, true);
+    } else {
+      console.log('CORS blocked for origin:', origin);
+      return callback(new Error('Not allowed by CORS'), false);
+    }
+  },
+  credentials: true, // This is crucial for cookies
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Cookie', 'Accept'],
+  exposedHeaders: ['set-cookie']
 }));
+
+// Handle preflight requests
+app.options('*', cors());
 
 // Body parser middleware
 app.use(express.json({ limit: '50mb' }));
 
-// Session configuration
+// Session configuration for cross-domain
 app.use(session({
   secret: process.env.SESSION_SECRET || 'fallback-session-secret-change-in-production',
   resave: false,
   saveUninitialized: false,
   cookie: {
-    secure: process.env.NODE_ENV === 'production',
+    secure: true, // Must be true for HTTPS in production
+    httpOnly: true,
+    sameSite: 'none', // Crucial for cross-domain
     maxAge: 24 * 60 * 60 * 1000 // 24 hours
   }
 }));
@@ -56,6 +80,7 @@ const REPORTS_COLLECTION = 'reports';
 const COORDINATES_COLLECTION = 'coordinates';
 const POSTS_COLLECTION = 'posts';
 const USERS_COLLECTION = 'users';
+const SESSIONS_COLLECTION = 'sessions';
 
 // Connect to MongoDB
 async function connectToDatabase() {
@@ -73,6 +98,25 @@ async function connectToDatabase() {
 
 connectToDatabase();
 
+// Simple session cleanup function
+async function cleanupExpiredSessions() {
+  try {
+    const database = client.db(DB_NAME);
+    const sessions = database.collection(SESSIONS_COLLECTION);
+    const result = await sessions.deleteMany({
+      expires: { $lt: new Date() }
+    });
+    if (result.deletedCount > 0) {
+      console.log(`Cleaned up ${result.deletedCount} expired sessions`);
+    }
+  } catch (error) {
+    console.error('Error cleaning up sessions:', error);
+  }
+}
+
+// Run cleanup every hour
+setInterval(cleanupExpiredSessions, 60 * 60 * 1000);
+
 // =============================================
 // PASSPORT GOOGLE OAUTH STRATEGY
 // =============================================
@@ -80,23 +124,46 @@ connectToDatabase();
 passport.use(new GoogleStrategy({
   clientID: process.env.GOOGLE_CLIENT_ID,
   clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-  callbackURL: `${process.env.BACKEND_URL || 'http://localhost:3001'}/auth/google/callback`
-}, async (accessToken, refreshToken, profile, done) => {
+  callbackURL: `${process.env.BACKEND_URL || 'http://localhost:3001'}/auth/google/callback`,
+  passReqToCallback: true
+}, async (req, accessToken, refreshToken, profile, done) => {
   try {
     console.log('Google OAuth profile received:', profile.displayName);
+    console.log('Profile email:', profile.emails?.[0]?.value);
     
     const database = client.db(DB_NAME);
     const users = database.collection(USERS_COLLECTION);
     
-    // Check if user already exists
-    let user = await users.findOne({ googleId: profile.id });
+    // Check if user already exists by googleId OR email
+    let user = await users.findOne({ 
+      $or: [
+        { googleId: profile.id },
+        { email: profile.emails[0].value }
+      ]
+    });
     
     if (user) {
       console.log('Existing user found:', user.email);
-      // Update last login time
+      
+      // Update googleId if missing (for migration)
+      if (!user.googleId) {
+        await users.updateOne(
+          { _id: user._id },
+          { $set: { googleId: profile.id } }
+        );
+        user.googleId = profile.id;
+      }
+      
+      // Update last login time and profile info
       await users.updateOne(
-        { googleId: profile.id },
-        { $set: { lastLogin: new Date() } }
+        { _id: user._id },
+        { 
+          $set: { 
+            lastLogin: new Date(),
+            name: profile.displayName,
+            photo: profile.photos[0].value
+          } 
+        }
       );
       return done(null, user);
     } else {
@@ -126,7 +193,7 @@ passport.use(new GoogleStrategy({
 
 // Serialize user to session
 passport.serializeUser((user, done) => {
-  done(null, user._id);
+  done(null, user._id.toString());
 });
 
 // Deserialize user from session
@@ -168,6 +235,13 @@ const requireAdmin = (req, res, next) => {
 
 // Start Google OAuth flow
 app.get('/auth/google',
+  (req, res, next) => {
+    // Store redirect URL if provided
+    if (req.query.redirect) {
+      req.session.oauthRedirect = req.query.redirect;
+    }
+    next();
+  },
   passport.authenticate('google', { 
     scope: ['profile', 'email'],
     prompt: 'select_account'
@@ -181,8 +255,15 @@ app.get('/auth/google/callback',
   }),
   (req, res) => {
     console.log('Google OAuth successful for user:', req.user.email);
+    
+    // Get redirect URL from session or use default
+    const redirectTo = req.session.oauthRedirect || '/dashboard';
+    
+    // Clear session value
+    delete req.session.oauthRedirect;
+    
     // Successful authentication
-    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/success`);
+    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}${redirectTo}`);
   }
 );
 
@@ -209,6 +290,23 @@ app.get('/auth/user', (req, res) => {
   }
 });
 
+// Debug endpoint to check session
+app.get('/auth/debug', (req, res) => {
+  console.log('Session ID:', req.sessionID);
+  console.log('Session data:', req.session);
+  console.log('User authenticated:', req.isAuthenticated());
+  console.log('User:', req.user);
+  console.log('Cookies:', req.headers.cookie);
+  
+  res.json({
+    sessionId: req.sessionID,
+    session: req.session,
+    isAuthenticated: req.isAuthenticated(),
+    user: req.user,
+    cookies: req.headers.cookie
+  });
+});
+
 // Logout user
 app.post('/auth/logout', (req, res) => {
   req.logout((err) => {
@@ -216,7 +314,12 @@ app.post('/auth/logout', (req, res) => {
       console.error('Logout error:', err);
       return res.status(500).json({ error: 'Logout failed' });
     }
-    res.json({ message: 'Logged out successfully' });
+    req.session.destroy((err) => {
+      if (err) {
+        console.error('Session destroy error:', err);
+      }
+      res.json({ message: 'Logged out successfully' });
+    });
   });
 });
 
@@ -234,7 +337,7 @@ app.get('/auth/status', (req, res) => {
 });
 
 // =============================================
-// REPORTS API ROUTES (Updated with Auth Support)
+// REPORTS API ROUTES
 // =============================================
 
 // Get all reports (public)
@@ -734,7 +837,14 @@ app.get('/health', async (req, res) => {
       timestamp: new Date().toISOString(),
       database: 'Connected to MongoDB Atlas',
       auth: 'Google OAuth enabled',
-      environment: process.env.NODE_ENV || 'development'
+      environment: process.env.NODE_ENV || 'development',
+      envVars: {
+        hasGoogleClientId: !!process.env.GOOGLE_CLIENT_ID,
+        hasGoogleClientSecret: !!process.env.GOOGLE_CLIENT_SECRET,
+        hasSessionSecret: !!process.env.SESSION_SECRET,
+        frontendUrl: process.env.FRONTEND_URL,
+        backendUrl: process.env.BACKEND_URL
+      }
     });
   } catch (error) {
     console.error('Health check failed:', error);
