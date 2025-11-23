@@ -256,16 +256,32 @@ app.get('/auth/google/callback',
   (req, res) => {
     console.log('Google OAuth successful for user:', req.user.email);
     
-    // Get redirect URL from session or use default
-    const redirectTo = req.session.oauthRedirect || '/dashboard';
+    // Always redirect to auth/success page first
+    const redirectTo = '/auth/success';
     
     // Clear session value
     delete req.session.oauthRedirect;
     
-    // Successful authentication
+    // Successful authentication - redirect to auth success page
     res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}${redirectTo}`);
   }
 );
+
+// Auth success endpoint - for frontend to verify auth after OAuth
+app.get('/auth/success', requireAuth, (req, res) => {
+  res.json({ 
+    user: {
+      id: req.user._id,
+      googleId: req.user.googleId,
+      name: req.user.name,
+      email: req.user.email,
+      photo: req.user.photo,
+      role: req.user.role,
+      isActive: req.user.isActive
+    },
+    isAuthenticated: true
+  });
+});
 
 // Get current user info
 app.get('/auth/user', (req, res) => {
