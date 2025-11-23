@@ -1,18 +1,47 @@
 const express = require('express');
 const cors = require('cors');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
+const passport = require('passport');
+const GoogleStrategy = require('passport-google-oauth20').Strategy;
+const session = require('express-session');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Middleware
-app.use(cors());
-app.use(express.json({ limit: '50mb' })); // Increased limit for image uploads
+// =============================================
+// MIDDLEWARE CONFIGURATION
+// =============================================
 
-// MongoDB Atlas connection string - replace with your actual credentials
+// CORS configuration
+app.use(cors({
+  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+  credentials: true
+}));
+
+// Body parser middleware
+app.use(express.json({ limit: '50mb' }));
+
+// Session configuration
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'fallback-session-secret-change-in-production',
+  resave: false,
+  saveUninitialized: false,
+  cookie: {
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 24 * 60 * 60 * 1000 // 24 hours
+  }
+}));
+
+// Initialize Passport
+app.use(passport.initialize());
+app.use(passport.session());
+
+// =============================================
+// MONGODB CONFIGURATION
+// =============================================
+
 const MONGODB_URI = "mongodb+srv://kasyak-render:kasyak-database-password@hackathon-data.uo8k8xi.mongodb.net/?appName=hackathon-data";
 
-// Create a MongoClient with Stable API configuration
 const client = new MongoClient(MONGODB_URI, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -26,28 +55,189 @@ const DB_NAME = 'skogeohydro';
 const REPORTS_COLLECTION = 'reports';
 const COORDINATES_COLLECTION = 'coordinates';
 const POSTS_COLLECTION = 'posts';
+const USERS_COLLECTION = 'users';
 
-// Connect to MongoDB once when the server starts
+// Connect to MongoDB
 async function connectToDatabase() {
   try {
     await client.connect();
     console.log("✅ Successfully connected to MongoDB Atlas!");
     
-    // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log("Pinged your deployment. Connection is stable.");
   } catch (error) {
     console.error("❌ Failed to connect to MongoDB", error);
-    process.exit(1); // Stop the server if connection fails
+    process.exit(1);
   }
 }
 
-// Call the connection function
 connectToDatabase();
 
-// REPORTS API ROUTES
+// =============================================
+// PASSPORT GOOGLE OAUTH STRATEGY
+// =============================================
 
-// Get all reports
+passport.use(new GoogleStrategy({
+  clientID: process.env.GOOGLE_CLIENT_ID,
+  clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+  callbackURL: `${process.env.BACKEND_URL || 'http://localhost:3001'}/auth/google/callback`
+}, async (accessToken, refreshToken, profile, done) => {
+  try {
+    console.log('Google OAuth profile received:', profile.displayName);
+    
+    const database = client.db(DB_NAME);
+    const users = database.collection(USERS_COLLECTION);
+    
+    // Check if user already exists
+    let user = await users.findOne({ googleId: profile.id });
+    
+    if (user) {
+      console.log('Existing user found:', user.email);
+      // Update last login time
+      await users.updateOne(
+        { googleId: profile.id },
+        { $set: { lastLogin: new Date() } }
+      );
+      return done(null, user);
+    } else {
+      console.log('Creating new user for:', profile.emails[0].value);
+      // Create new user
+      const newUser = {
+        googleId: profile.id,
+        name: profile.displayName,
+        email: profile.emails[0].value,
+        photo: profile.photos[0].value,
+        role: 'user',
+        isActive: true,
+        createdAt: new Date(),
+        lastLogin: new Date()
+      };
+      
+      const result = await users.insertOne(newUser);
+      newUser._id = result.insertedId;
+      console.log('New user created successfully');
+      return done(null, newUser);
+    }
+  } catch (error) {
+    console.error('Error in Google Strategy:', error);
+    return done(error, null);
+  }
+}));
+
+// Serialize user to session
+passport.serializeUser((user, done) => {
+  done(null, user._id);
+});
+
+// Deserialize user from session
+passport.deserializeUser(async (id, done) => {
+  try {
+    const database = client.db(DB_NAME);
+    const users = database.collection(USERS_COLLECTION);
+    const user = await users.findOne({ _id: new ObjectId(id) });
+    done(null, user);
+  } catch (error) {
+    console.error('Error deserializing user:', error);
+    done(error, null);
+  }
+});
+
+// =============================================
+// AUTHENTICATION MIDDLEWARE
+// =============================================
+
+// Check if user is authenticated
+const requireAuth = (req, res, next) => {
+  if (req.isAuthenticated()) {
+    return next();
+  }
+  res.status(401).json({ error: 'Authentication required' });
+};
+
+// Check if user is admin
+const requireAdmin = (req, res, next) => {
+  if (req.isAuthenticated() && req.user.role === 'admin') {
+    return next();
+  }
+  res.status(403).json({ error: 'Admin access required' });
+};
+
+// =============================================
+// AUTHENTICATION ROUTES
+// =============================================
+
+// Start Google OAuth flow
+app.get('/auth/google',
+  passport.authenticate('google', { 
+    scope: ['profile', 'email'],
+    prompt: 'select_account'
+  })
+);
+
+// Google OAuth callback
+app.get('/auth/google/callback',
+  passport.authenticate('google', { 
+    failureRedirect: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login?error=auth_failed` 
+  }),
+  (req, res) => {
+    console.log('Google OAuth successful for user:', req.user.email);
+    // Successful authentication
+    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/auth/success`);
+  }
+);
+
+// Get current user info
+app.get('/auth/user', (req, res) => {
+  if (req.isAuthenticated()) {
+    res.json({ 
+      user: {
+        id: req.user._id,
+        googleId: req.user.googleId,
+        name: req.user.name,
+        email: req.user.email,
+        photo: req.user.photo,
+        role: req.user.role,
+        isActive: req.user.isActive
+      },
+      isAuthenticated: true
+    });
+  } else {
+    res.json({ 
+      user: null,
+      isAuthenticated: false 
+    });
+  }
+});
+
+// Logout user
+app.post('/auth/logout', (req, res) => {
+  req.logout((err) => {
+    if (err) {
+      console.error('Logout error:', err);
+      return res.status(500).json({ error: 'Logout failed' });
+    }
+    res.json({ message: 'Logged out successfully' });
+  });
+});
+
+// Check auth status
+app.get('/auth/status', (req, res) => {
+  res.json({ 
+    isAuthenticated: req.isAuthenticated(),
+    user: req.isAuthenticated() ? {
+      id: req.user._id,
+      name: req.user.name,
+      email: req.user.email,
+      role: req.user.role
+    } : null
+  });
+});
+
+// =============================================
+// REPORTS API ROUTES (Updated with Auth Support)
+// =============================================
+
+// Get all reports (public)
 app.get('/api/reports', async (req, res) => {
   try {
     const database = client.db(DB_NAME);
@@ -60,7 +250,7 @@ app.get('/api/reports', async (req, res) => {
   }
 });
 
-// Submit new report
+// Submit new report (supports both authenticated and anonymous users)
 app.post('/api/reports', async (req, res) => {
   try {
     const { type, location, coordinates, description, severity, email, phone } = req.body;
@@ -82,7 +272,11 @@ app.post('/api/reports', async (req, res) => {
       phone: phone || '',
       status: 'pending',
       createdAt: new Date(),
-      updatedAt: new Date()
+      updatedAt: new Date(),
+      // Add user info if authenticated
+      userId: req.isAuthenticated() ? req.user._id.toString() : null,
+      userEmail: req.isAuthenticated() ? req.user.email : (email || ''),
+      userName: req.isAuthenticated() ? req.user.name : ''
     };
 
     const result = await reports.insertOne(newReport);
@@ -95,6 +289,22 @@ app.post('/api/reports', async (req, res) => {
   } catch (error) {
     console.error('Error submitting report:', error);
     res.status(500).json({ error: 'Failed to submit report' });
+  }
+});
+
+// Get user's own reports (requires authentication)
+app.get('/api/my-reports', requireAuth, async (req, res) => {
+  try {
+    const database = client.db(DB_NAME);
+    const reports = database.collection(REPORTS_COLLECTION);
+    const userReports = await reports.find({ 
+      userId: req.user._id.toString() 
+    }).sort({ createdAt: -1 }).toArray();
+    
+    res.json(userReports);
+  } catch (error) {
+    console.error('Error fetching user reports:', error);
+    res.status(500).json({ error: 'Failed to fetch user reports' });
   }
 });
 
@@ -152,7 +362,9 @@ app.delete('/api/reports/:id', async (req, res) => {
   }
 });
 
+// =============================================
 // COORDINATES API ROUTES
+// =============================================
 
 // Get all coordinates
 app.get('/api/coordinates', async (req, res) => {
@@ -191,7 +403,11 @@ app.post('/api/coordinates', async (req, res) => {
       description: description || '',
       status: 'pending',
       createdAt: new Date(),
-      updatedAt: new Date()
+      updatedAt: new Date(),
+      // Add user info if authenticated
+      userId: req.isAuthenticated() ? req.user._id.toString() : null,
+      userEmail: req.isAuthenticated() ? req.user.email : '',
+      userName: req.isAuthenticated() ? req.user.name : ''
     };
 
     const result = await coordinates.insertOne(newCoordinate);
@@ -263,7 +479,9 @@ app.delete('/api/coordinates/:id', async (req, res) => {
   }
 });
 
+// =============================================
 // POSTS API ROUTES
+// =============================================
 
 // Get all posts (for admin)
 app.get('/api/posts', async (req, res) => {
@@ -347,7 +565,11 @@ app.post('/api/posts', async (req, res) => {
       status: status,
       createdAt: new Date(),
       updatedAt: new Date(),
-      publishedAt: status === 'approved' ? new Date() : null
+      publishedAt: status === 'approved' ? new Date() : null,
+      // Add user info if authenticated
+      userId: req.isAuthenticated() ? req.user._id.toString() : null,
+      userEmail: req.isAuthenticated() ? req.user.email : '',
+      userName: req.isAuthenticated() ? req.user.name : ''
     };
 
     const result = await posts.insertOne(newPost);
@@ -440,14 +662,79 @@ app.delete('/api/posts/:id', async (req, res) => {
   }
 });
 
-// Health check
+// =============================================
+// USER MANAGEMENT ROUTES
+// =============================================
+
+// Get all users (admin only)
+app.get('/api/users', requireAdmin, async (req, res) => {
+  try {
+    const database = client.db(DB_NAME);
+    const users = database.collection(USERS_COLLECTION);
+    const allUsers = await users.find({}).sort({ createdAt: -1 }).toArray();
+    
+    // Remove sensitive data
+    const safeUsers = allUsers.map(user => ({
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      photo: user.photo,
+      role: user.role,
+      isActive: user.isActive,
+      createdAt: user.createdAt,
+      lastLogin: user.lastLogin
+    }));
+    
+    res.json(safeUsers);
+  } catch (error) {
+    console.error('Error fetching users:', error);
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
+});
+
+// Update user role (admin only)
+app.put('/api/users/:id/role', requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { role } = req.body;
+
+    if (!role || !['user', 'admin', 'moderator'].includes(role)) {
+      return res.status(400).json({ error: 'Invalid role' });
+    }
+
+    const database = client.db(DB_NAME);
+    const users = database.collection(USERS_COLLECTION);
+
+    const result = await users.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { role: role, updatedAt: new Date() } }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({ message: 'User role updated successfully' });
+  } catch (error) {
+    console.error('Error updating user role:', error);
+    res.status(500).json({ error: 'Failed to update user role' });
+  }
+});
+
+// =============================================
+// HEALTH CHECK AND ROOT ROUTES
+// =============================================
+
+// Health check endpoint
 app.get('/health', async (req, res) => {
   try {
     await client.db("admin").command({ ping: 1 });
     res.json({ 
       status: 'OK', 
       timestamp: new Date().toISOString(),
-      database: 'Connected to MongoDB Atlas'
+      database: 'Connected to MongoDB Atlas',
+      auth: 'Google OAuth enabled',
+      environment: process.env.NODE_ENV || 'development'
     });
   } catch (error) {
     console.error('Health check failed:', error);
@@ -459,27 +746,72 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// Root route
+// Root endpoint
 app.get('/', (req, res) => {
   res.json({ 
     message: 'SKO GeoHydro Portal API',
     version: '1.0.0',
     database: 'MongoDB Atlas',
-    timestamp: new Date().toISOString()
+    auth: 'Google OAuth Enabled',
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      auth: [
+        'GET  /auth/google',
+        'GET  /auth/user',
+        'GET  /auth/status',
+        'POST /auth/logout'
+      ],
+      reports: [
+        'GET  /api/reports',
+        'POST /api/reports',
+        'GET  /api/my-reports (auth required)'
+      ],
+      coordinates: [
+        'GET  /api/coordinates',
+        'POST /api/coordinates'
+      ],
+      posts: [
+        'GET  /api/posts',
+        'GET  /api/posts/feed',
+        'POST /api/posts'
+      ]
+    }
   });
+});
+
+// =============================================
+// ERROR HANDLING AND GRACEFUL SHUTDOWN
+// =============================================
+
+// 404 handler
+app.use('*', (req, res) => {
+  res.status(404).json({ error: 'Endpoint not found' });
+});
+
+// Error handling middleware
+app.use((error, req, res, next) => {
+  console.error('Unhandled error:', error);
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
   console.log('Shutting down gracefully...');
   await client.close();
+  console.log('MongoDB connection closed.');
   process.exit(0);
 });
 
+// Start server
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📁 Connected to MongoDB Atlas: hackathon-data.uo8k8xi.mongodb.net`);
-  console.log(`🌐 Health check: http://0.0.0.0:${PORT}/health`);
-  console.log(`📝 Posts API available at: http://0.0.0.0:${PORT}/api/posts`);
-  console.log(`📰 Feed API available at: http://0.0.0.0:${PORT}/api/posts/feed`);
+  console.log(`🔐 Google OAuth: ${process.env.GOOGLE_CLIENT_ID ? 'Configured' : 'Not configured'}`);
+  console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log(`📊 Database: ${DB_NAME}`);
+  console.log(`🔑 Auth routes:`);
+  console.log(`   - GET  http://0.0.0.0:${PORT}/auth/google`);
+  console.log(`   - GET  http://0.0.0.0:${PORT}/auth/user`);
+  console.log(`   - POST http://0.0.0.0:${PORT}/auth/logout`);
+  console.log(`🏥 Health check: http://0.0.0.0:${PORT}/health`);
 });
