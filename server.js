@@ -271,21 +271,41 @@ app.get('/auth/google',
 
 // Google OAuth callback
 // Google OAuth callback
-app.get('/auth/google/callback',
-  passport.authenticate('google', { 
-    failureRedirect: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login?error=auth_failed`
-  }),
-  (req, res) => {
-    console.log('=== CALLBACK DEBUG ===');
-    console.log('After passport.authenticate:');
-    console.log('Session ID:', req.sessionID);
-    console.log('Is Authenticated:', req.isAuthenticated());
-    console.log('User:', req.user);
+// Google OAuth callback
+app.get('/auth/google/callback', (req, res, next) => {
+  passport.authenticate('google', (err, user, info) => {
+    console.log('=== PASSPORT AUTHENTICATE CALLBACK ===');
+    console.log('Error:', err);
+    console.log('User:', user);
+    console.log('Info:', info);
     
-    // Successful authentication, redirect home
-    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/`);
-  }
-);
+    if (err) {
+      console.error('Auth error:', err);
+      return res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/login?error=auth_failed`);
+    }
+    
+    if (!user) {
+      console.error('No user returned');
+      return res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/login?error=no_user`);
+    }
+    
+    // Manually log the user in
+    req.login(user, (loginErr) => {
+      if (loginErr) {
+        console.error('Login error:', loginErr);
+        return res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/login?error=login_failed`);
+      }
+      
+      console.log('=== AFTER MANUAL LOGIN ===');
+      console.log('Session ID:', req.sessionID);
+      console.log('Is Authenticated:', req.isAuthenticated());
+      console.log('User:', req.user);
+      
+      // Successful authentication, redirect home
+      return res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/`);
+    });
+  })(req, res, next);
+});
 
 // Get current user info
 app.get('/auth/user', (req, res) => {
