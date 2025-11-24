@@ -43,25 +43,11 @@ app.options('*', cors());
 // Body parser middleware
 app.use(express.json({ limit: '50mb' }));
 
-// MongoDB session store
-const MongoDBStore = require('connect-mongodb-session')(session);
-
-const store = new MongoDBStore({
-  uri: MONGODB_URI,
-  collection: SESSIONS_COLLECTION,
-  databaseName: DB_NAME
-});
-
-store.on('error', function(error) {
-  console.log('Session store error:', error);
-});
-
 // Session configuration for cross-domain
 app.use(session({
   secret: process.env.SESSION_SECRET || 'fallback-session-secret-change-in-production',
   resave: false,
   saveUninitialized: false,
-  store: store,  // Add MongoDB store
   cookie: {
     secure: true, // Must be true for HTTPS in production
     httpOnly: true,
@@ -69,6 +55,7 @@ app.use(session({
     maxAge: 24 * 60 * 60 * 1000 // 24 hours
   }
 }));
+
 // Initialize Passport
 app.use(passport.initialize());
 app.use(passport.session());
@@ -256,12 +243,11 @@ app.get('/auth/google',
     next();
   },
   passport.authenticate('google', { 
-  scope: ['profile', 'email'],
-  prompt: 'consent'  // Force consent screen every time
+    scope: ['profile', 'email'],
+    prompt: 'consent'  // Force consent screen every time
   })
 );
 
-// Google OAuth callback
 // Google OAuth callback
 app.get('/auth/google/callback',
   passport.authenticate('google', { 
@@ -272,27 +258,6 @@ app.get('/auth/google/callback',
     res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/`);
   }
 );
-
-// Auth success endpoint - for frontend to verify auth after OAuth
-app.get('/auth/success', (req, res) => {
-  if (req.isAuthenticated()) {
-    res.json({ 
-      user: {
-        id: req.user._id,
-        googleId: req.user.googleId,
-        name: req.user.name,
-        email: req.user.email,
-        photo: req.user.photo,
-        role: req.user.role,
-        isActive: req.user.isActive
-      },
-      isAuthenticated: true
-    });
-  } else {
-    // If not authenticated, redirect to login
-    res.redirect(`${process.env.FRONTEND_URL || 'https://hackathon-one-blue.vercel.app'}/login?error=session_lost`);
-  }
-});
 
 // Get current user info
 app.get('/auth/user', (req, res) => {
