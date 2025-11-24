@@ -129,12 +129,10 @@ passport.use(new GoogleStrategy({
 }, async (req, accessToken, refreshToken, profile, done) => {
   try {
     console.log('Google OAuth profile received:', profile.displayName);
-    console.log('Profile email:', profile.emails?.[0]?.value);
     
     const database = client.db(DB_NAME);
     const users = database.collection(USERS_COLLECTION);
     
-    // Check if user already exists by googleId OR email
     let user = await users.findOne({ 
       $or: [
         { googleId: profile.id },
@@ -145,7 +143,6 @@ passport.use(new GoogleStrategy({
     if (user) {
       console.log('Existing user found:', user.email);
       
-      // Update googleId if missing (for migration)
       if (!user.googleId) {
         await users.updateOne(
           { _id: user._id },
@@ -154,7 +151,6 @@ passport.use(new GoogleStrategy({
         user.googleId = profile.id;
       }
       
-      // Update last login time and profile info
       await users.updateOne(
         { _id: user._id },
         { 
@@ -165,10 +161,12 @@ passport.use(new GoogleStrategy({
           } 
         }
       );
-      return done(null, user);
+      
+      // IMPORTANT: Return the updated user
+      const updatedUser = await users.findOne({ _id: user._id });
+      return done(null, updatedUser);
     } else {
       console.log('Creating new user for:', profile.emails[0].value);
-      // Create new user
       const newUser = {
         googleId: profile.id,
         name: profile.displayName,
