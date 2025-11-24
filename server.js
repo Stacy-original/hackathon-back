@@ -243,8 +243,8 @@ app.get('/auth/google',
     next();
   },
   passport.authenticate('google', { 
-    scope: ['profile', 'email'],
-    prompt: 'select_account'
+  scope: ['profile', 'email'],
+  prompt: 'consent'  // Force consent screen every time
   })
 );
 
