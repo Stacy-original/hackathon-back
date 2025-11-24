@@ -43,11 +43,25 @@ app.options('*', cors());
 // Body parser middleware
 app.use(express.json({ limit: '50mb' }));
 
+// MongoDB session store
+const MongoDBStore = require('connect-mongodb-session')(session);
+
+const store = new MongoDBStore({
+  uri: MONGODB_URI,
+  collection: SESSIONS_COLLECTION,
+  databaseName: DB_NAME
+});
+
+store.on('error', function(error) {
+  console.log('Session store error:', error);
+});
+
 // Session configuration for cross-domain
 app.use(session({
   secret: process.env.SESSION_SECRET || 'fallback-session-secret-change-in-production',
   resave: false,
   saveUninitialized: false,
+  store: store,  // Add MongoDB store
   cookie: {
     secure: true, // Must be true for HTTPS in production
     httpOnly: true,
@@ -55,7 +69,6 @@ app.use(session({
     maxAge: 24 * 60 * 60 * 1000 // 24 hours
   }
 }));
-
 // Initialize Passport
 app.use(passport.initialize());
 app.use(passport.session());
