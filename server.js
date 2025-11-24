@@ -266,7 +266,8 @@ app.get('/auth/google/callback',
         console.error('Session save error:', err);
       }
       
-      const redirectTo = '/auth/success';
+      
+      const redirectTo = '/';  // Redirect to home page instead
       delete req.session.oauthRedirect;
       
       res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}${redirectTo}`);
@@ -275,19 +276,24 @@ app.get('/auth/google/callback',
 );
 
 // Auth success endpoint - for frontend to verify auth after OAuth
-app.get('/auth/success', requireAuth, (req, res) => {
-  res.json({ 
-    user: {
-      id: req.user._id,
-      googleId: req.user.googleId,
-      name: req.user.name,
-      email: req.user.email,
-      photo: req.user.photo,
-      role: req.user.role,
-      isActive: req.user.isActive
-    },
-    isAuthenticated: true
-  });
+app.get('/auth/success', (req, res) => {
+  if (req.isAuthenticated()) {
+    res.json({ 
+      user: {
+        id: req.user._id,
+        googleId: req.user.googleId,
+        name: req.user.name,
+        email: req.user.email,
+        photo: req.user.photo,
+        role: req.user.role,
+        isActive: req.user.isActive
+      },
+      isAuthenticated: true
+    });
+  } else {
+    // If not authenticated, redirect to login
+    res.redirect(`${process.env.FRONTEND_URL || 'https://hackathon-one-blue.vercel.app'}/login?error=session_lost`);
+  }
 });
 
 // Get current user info
