@@ -234,6 +234,29 @@ const requireAdmin = (req, res, next) => {
 // =============================================
 
 // Start Google OAuth flow
+// =============================================
+// AUTHENTICATION ROUTES
+// =============================================
+
+// Debug OAuth flow
+app.get('/auth/debug-oauth', (req, res) => {
+  console.log('=== OAUTH DEBUG ===');
+  console.log('Session ID:', req.sessionID);
+  console.log('Session:', req.session);
+  console.log('Is Authenticated:', req.isAuthenticated());
+  console.log('User:', req.user);
+  console.log('Cookies:', req.headers.cookie);
+  
+  res.json({
+    sessionId: req.sessionID,
+    hasSession: !!req.session,
+    isAuthenticated: req.isAuthenticated(),
+    user: req.user,
+    cookies: req.headers.cookie
+  });
+});
+
+
 app.get('/auth/google',
   (req, res, next) => {
     // Store redirect URL if provided
@@ -249,11 +272,18 @@ app.get('/auth/google',
 );
 
 // Google OAuth callback
+// Google OAuth callback
 app.get('/auth/google/callback',
   passport.authenticate('google', { 
     failureRedirect: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login?error=auth_failed`
   }),
   (req, res) => {
+    console.log('=== CALLBACK DEBUG ===');
+    console.log('After passport.authenticate:');
+    console.log('Session ID:', req.sessionID);
+    console.log('Is Authenticated:', req.isAuthenticated());
+    console.log('User:', req.user);
+    
     // Successful authentication, redirect home
     res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/`);
   }
