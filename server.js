@@ -252,26 +252,11 @@ app.get('/auth/google',
 // Google OAuth callback
 app.get('/auth/google/callback',
   passport.authenticate('google', { 
-    failureRedirect: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login?error=auth_failed`,
-    session: true  // Explicitly enable session
+    failureRedirect: `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login?error=auth_failed`
   }),
   (req, res) => {
-    console.log('Google OAuth successful for user:', req.user.email);
-    console.log('Session after auth:', req.session);
-    console.log('Is authenticated:', req.isAuthenticated());
-    
-    // Save session explicitly before redirect
-    req.session.save((err) => {
-      if (err) {
-        console.error('Session save error:', err);
-      }
-      
-      
-      const redirectTo = '/';  // Redirect to home page instead
-      delete req.session.oauthRedirect;
-      
-      res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}${redirectTo}`);
-    });
+    // Successful authentication, redirect home
+    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}/`);
   }
 );
 
