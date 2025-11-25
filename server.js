@@ -50,7 +50,7 @@ const USER_ROLES = {
   ADMIN: 2
 };
 
-// Cache for user roles to reduce database queries (optional, can remove if not needed)
+// Cache for user roles to reduce database queries
 const userRoleCache = new Map();
 
 // Enhanced middleware to validate AND VERIFY user data from frontend
@@ -203,16 +203,9 @@ async function connectToDatabase() {
     await client.db("admin").command({ ping: 1 });
     console.log("Pinged your deployment. Connection is stable.");
     
-    // Create indexes for better performance
-    const database = client.db(DB_NAME);
-    await database.collection(USERS_COLLECTION).createIndex({ id: 1 }, { unique: true });
-    await database.collection(USERS_COLLECTION).createIndex({ email: 1 }, { unique: true });
-    await database.collection(REPORTS_COLLECTION).createIndex({ userId: 1 });
-    await database.collection(REPORTS_COLLECTION).createIndex({ status: 1 });
-    await database.collection(POSTS_COLLECTION).createIndex({ status: 1 });
-    await database.collection(POSTS_COLLECTION).createIndex({ authorId: 1 });
+    // ✅ TEMPORARY: Skip index creation to avoid deployment issues
+    console.log("⚠️ Index creation skipped - server running without indexes");
     
-    console.log("Database indexes created");
   } catch (error) {
     console.error("❌ Failed to connect to MongoDB", error);
     process.exit(1);
@@ -225,9 +218,10 @@ connectToDatabase();
 // SECURE USER MANAGEMENT ROUTES
 // =============================================
 
+// Create or update user from frontend data - RETURNS ACTUAL DATABASE ROLE
 app.post('/api/users/sync', async (req, res) => {
   try {
-    const userData = req.body.userData || req.body; // Support both nested and direct
+    const userData = req.body.userData || req.body;
     console.log('Syncing user:', userData.email);
     
     if (!userData || !userData.id || !userData.email || !userData.name) {
@@ -251,7 +245,7 @@ app.post('/api/users/sync', async (req, res) => {
     let isNewUser = false;
     
     if (existingUser) {
-      // ✅ CRITICAL FIX: PRESERVE EXISTING ROLE, don't overwrite it
+      // ✅ UPDATE EXISTING USER - PRESERVE ROLE, update other fields
       const updateData = {
         name: name,
         email: email.toLowerCase(),
@@ -260,18 +254,19 @@ app.post('/api/users/sync', async (req, res) => {
         updatedAt: new Date()
       };
       
-      // ✅ NEVER overwrite existing role from frontend data
+      // ✅ CRITICAL: NEVER overwrite the role from frontend data
       // The role stays as whatever is in the database
       
       await users.updateOne(
-        { id: id },
+        { id: existingUser.id },
         { 
           $set: updateData
         }
       );
       
-      user = await users.findOne({ id: id });
-      console.log('✅ Updated existing user:', email, 'Role:', user.role);
+      // Get the updated user with preserved role
+      user = await users.findOne({ id: existingUser.id });
+      console.log('✅ Updated existing user:', email, 'Role preserved:', user.role);
     } else {
       // Create new user - SET DEFAULT USER ROLE FOR SECURITY
       const newUser = {
@@ -294,7 +289,7 @@ app.post('/api/users/sync', async (req, res) => {
     // Update cache
     userRoleCache.set(user.id, user.role);
     
-    // Return ACTUAL DATABASE ROLE to frontend (critical fix)
+    // Return ACTUAL DATABASE ROLE to frontend
     res.json({
       message: isNewUser ? 'User created successfully' : 'User synced successfully',
       user: {
@@ -302,7 +297,7 @@ app.post('/api/users/sync', async (req, res) => {
         name: user.name,
         email: user.email,
         photo: user.photo,
-        role: user.role, // ACTUAL DATABASE ROLE
+        role: user.role, // ACTUAL DATABASE ROLE (never overwritten)
         isActive: user.isActive,
         createdAt: user.createdAt,
         lastLogin: user.lastLogin
@@ -362,6 +357,20 @@ app.post('/api/users/verify-role', validateAndVerifyUser, async (req, res) => {
   } catch (error) {
     console.error('Error verifying user role:', error);
     res.status(500).json({ error: 'Failed to verify user role' });
+  }
+});
+
+// Simple role check endpoint
+app.get('/api/users/me/role', validateAndVerifyUser, async (req, res) => {
+  try {
+    res.json({
+      role: req.user.role,
+      id: req.user.id,
+      name: req.user.name
+    });
+  } catch (error) {
+    console.error('Error fetching user role:', error);
+    res.status(500).json({ error: 'Failed to fetch user role' });
   }
 });
 
@@ -801,7 +810,7 @@ app.get('/health', async (req, res) => {
 app.get('/', (req, res) => {
   res.json({ 
     message: 'SKO GeoHydro Portal API',
-    version: '1.1.0', // Version bump for security fixes
+    version: '1.1.0',
     database: 'MongoDB Atlas',
     auth: 'Secure User Role System with Database Verification',
     security: 'All roles verified against database',
@@ -816,6 +825,7 @@ app.get('/', (req, res) => {
         'POST /api/users/sync (returns actual database role)',
         'GET  /api/users/:userId',
         'POST /api/users/verify-role (security endpoint)',
+        'GET  /api/users/me/role (get current user role)',
         'GET  /api/users (admin only)',
         'PUT  /api/users/:userId/role (admin only)'
       ],
