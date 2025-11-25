@@ -29,7 +29,7 @@ app.use(cors({
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Cookie', 'Accept'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Cookie', 'Accept', 'User-Data'],
   exposedHeaders: ['Authorization']
 }));
 
@@ -40,7 +40,7 @@ app.options('*', cors());
 app.use(express.json({ limit: '50mb' }));
 
 // =============================================
-// SIMPLE USER ROLE SYSTEM
+// ENHANCED USER ROLE SYSTEM WITH SECURITY
 // =============================================
 
 // User roles: 0 = regular user, 1 = editor, 2 = admin
@@ -50,50 +50,122 @@ const USER_ROLES = {
   ADMIN: 2
 };
 
-// Middleware to validate user data from frontend
-const validateUserData = (req, res, next) => {
+// Cache for user roles to reduce database queries (optional, can remove if not needed)
+const userRoleCache = new Map();
+
+// Enhanced middleware to validate AND VERIFY user data from frontend
+const validateAndVerifyUser = async (req, res, next) => {
   const userData = req.body.userData || req.headers['user-data'];
   
   if (!userData) {
-    return res.status(400).json({ error: 'User data required' });
+    return res.status(401).json({ error: 'User authentication required' });
   }
   
   try {
-    const user = typeof userData === 'string' ? JSON.parse(userData) : userData;
+    const frontendUser = typeof userData === 'string' ? JSON.parse(userData) : userData;
     
     // Validate required fields
-    if (!user.id || !user.email || !user.name) {
+    if (!frontendUser.id || !frontendUser.email || !frontendUser.name) {
       return res.status(400).json({ error: 'User data must contain id, email, and name' });
     }
     
-    // Set default role if not provided
-    if (user.role === undefined) {
-      user.role = USER_ROLES.USER;
+    // VERIFY USER ROLE FROM DATABASE (CRITICAL SECURITY FIX)
+    const database = client.db(DB_NAME);
+    const users = database.collection(USERS_COLLECTION);
+    
+    const dbUser = await users.findOne({ 
+      $or: [
+        { id: frontendUser.id },
+        { email: frontendUser.email.toLowerCase() }
+      ]
+    });
+    
+    if (!dbUser) {
+      return res.status(401).json({ error: 'User not found in database' });
     }
     
-    // Validate role
-    if (![USER_ROLES.USER, USER_ROLES.EDITOR, USER_ROLES.ADMIN].includes(user.role)) {
-      return res.status(400).json({ error: 'Invalid user role' });
+    if (!dbUser.isActive) {
+      return res.status(403).json({ error: 'User account is deactivated' });
     }
     
-    req.user = user;
+    // USE DATABASE ROLE, NOT FRONTEND PROVIDED ROLE (SECURITY FIX)
+    const verifiedUser = {
+      id: dbUser.id,
+      email: dbUser.email,
+      name: dbUser.name,
+      photo: dbUser.photo || frontendUser.photo,
+      role: dbUser.role, // Always use database role
+      isActive: dbUser.isActive,
+      lastLogin: dbUser.lastLogin
+    };
+    
+    // Update cache
+    userRoleCache.set(verifiedUser.id, verifiedUser.role);
+    
+    req.user = verifiedUser;
     next();
   } catch (error) {
-    console.error('Error parsing user data:', error);
-    return res.status(400).json({ error: 'Invalid user data format' });
+    console.error('Error verifying user:', error);
+    return res.status(401).json({ error: 'Invalid user authentication' });
   }
 };
 
-// Middleware to check user role
+// Lightweight validation for public endpoints that optionally use user data
+const validateUserDataOptional = async (req, res, next) => {
+  const userData = req.body.userData || req.headers['user-data'];
+  
+  if (!userData) {
+    return next(); // Continue without user
+  }
+  
+  try {
+    const frontendUser = typeof userData === 'string' ? JSON.parse(userData) : userData;
+    
+    if (!frontendUser.id || !frontendUser.email) {
+      return next(); // Invalid but optional, so continue
+    }
+    
+    // Verify with database for accurate role
+    const database = client.db(DB_NAME);
+    const users = database.collection(USERS_COLLECTION);
+    
+    const dbUser = await users.findOne({ 
+      $or: [
+        { id: frontendUser.id },
+        { email: frontendUser.email.toLowerCase() }
+      ]
+    });
+    
+    if (dbUser && dbUser.isActive) {
+      req.user = {
+        id: dbUser.id,
+        email: dbUser.email,
+        name: dbUser.name,
+        photo: dbUser.photo,
+        role: dbUser.role, // Use database role
+        isActive: dbUser.isActive
+      };
+    }
+    
+    next();
+  } catch (error) {
+    console.log('Optional user validation failed, continuing anonymously');
+    next(); // Continue without user
+  }
+};
+
+// Middleware to check user role (uses verified database role)
 const requireRole = (minRole) => {
   return (req, res, next) => {
     if (!req.user) {
-      return res.status(401).json({ error: 'User data required' });
+      return res.status(401).json({ error: 'Authentication required' });
     }
     
     if (req.user.role < minRole) {
       return res.status(403).json({ 
-        error: `Insufficient permissions. Required role: ${minRole}, your role: ${req.user.role}` 
+        error: `Insufficient permissions. Required role: ${minRole}, your role: ${req.user.role}`,
+        requiredRole: minRole,
+        userRole: req.user.role
       });
     }
     
@@ -130,6 +202,17 @@ async function connectToDatabase() {
     
     await client.db("admin").command({ ping: 1 });
     console.log("Pinged your deployment. Connection is stable.");
+    
+    // Create indexes for better performance
+    const database = client.db(DB_NAME);
+    await database.collection(USERS_COLLECTION).createIndex({ id: 1 }, { unique: true });
+    await database.collection(USERS_COLLECTION).createIndex({ email: 1 }, { unique: true });
+    await database.collection(REPORTS_COLLECTION).createIndex({ userId: 1 });
+    await database.collection(REPORTS_COLLECTION).createIndex({ status: 1 });
+    await database.collection(POSTS_COLLECTION).createIndex({ status: 1 });
+    await database.collection(POSTS_COLLECTION).createIndex({ authorId: 1 });
+    
+    console.log("Database indexes created");
   } catch (error) {
     console.error("❌ Failed to connect to MongoDB", error);
     process.exit(1);
@@ -139,16 +222,23 @@ async function connectToDatabase() {
 connectToDatabase();
 
 // =============================================
-// USER MANAGEMENT ROUTES
+// SECURE USER MANAGEMENT ROUTES
 // =============================================
 
-// Create or update user from frontend data
-app.post('/api/users/sync', validateUserData, async (req, res) => {
+// Create or update user from frontend data - RETURNS ACTUAL DATABASE ROLE
+app.post('/api/users/sync', async (req, res) => {
   try {
+    const userData = req.body.userData || req.body; // Support both nested and direct
+    console.log('Syncing user:', userData.email);
+    
+    if (!userData || !userData.id || !userData.email || !userData.name) {
+      return res.status(400).json({ error: 'User data must contain id, email, and name' });
+    }
+
     const database = client.db(DB_NAME);
     const users = database.collection(USERS_COLLECTION);
     
-    const { id, email, name, photo, role = USER_ROLES.USER } = req.user;
+    const { id, email, name, photo } = userData;
     
     // Check if user already exists
     const existingUser = await users.findOne({ 
@@ -159,19 +249,27 @@ app.post('/api/users/sync', validateUserData, async (req, res) => {
     });
     
     let user;
+    let isNewUser = false;
     
     if (existingUser) {
-      // Update existing user
+      // Update existing user - PRESERVE DATABASE ROLE (security fix)
+      const updateData = {
+        name: name,
+        email: email.toLowerCase(),
+        photo: photo || existingUser.photo,
+        lastLogin: new Date(),
+        updatedAt: new Date()
+      };
+      
+      // Only update role if it's a new user or role doesn't exist
+      if (!existingUser.role && userData.role !== undefined) {
+        updateData.role = Math.min(userData.role, USER_ROLES.USER); // Default to user role for security
+      }
+      
       await users.updateOne(
         { id: id },
         { 
-          $set: { 
-            name: name,
-            email: email.toLowerCase(),
-            photo: photo,
-            lastLogin: new Date(),
-            updatedAt: new Date()
-          },
+          $set: updateData,
           $setOnInsert: {
             createdAt: new Date()
           }
@@ -180,36 +278,41 @@ app.post('/api/users/sync', validateUserData, async (req, res) => {
       );
       
       user = await users.findOne({ id: id });
-      console.log('Updated existing user:', email);
+      console.log('Updated existing user:', email, 'Role:', user.role);
     } else {
-      // Create new user
+      // Create new user - SET DEFAULT USER ROLE FOR SECURITY
       const newUser = {
         id: id,
         email: email.toLowerCase(),
         name: name,
         photo: photo || '',
-        role: role,
+        role: USER_ROLES.USER, // Always default to user role for new users
         isActive: true,
         createdAt: new Date(),
         lastLogin: new Date()
       };
       
       const result = await users.insertOne(newUser);
-      newUser._id = result.insertedId;
-      user = newUser;
-      console.log('Created new user:', email);
+      user = { ...newUser, _id: result.insertedId };
+      isNewUser = true;
+      console.log('Created new user:', email, 'with default user role');
     }
     
+    // Update cache
+    userRoleCache.set(user.id, user.role);
+    
+    // Return ACTUAL DATABASE ROLE to frontend (critical fix)
     res.json({
-      message: 'User synced successfully',
+      message: isNewUser ? 'User created successfully' : 'User synced successfully',
       user: {
         id: user.id,
         name: user.name,
         email: user.email,
         photo: user.photo,
-        role: user.role,
+        role: user.role, // ACTUAL DATABASE ROLE
         isActive: user.isActive,
-        createdAt: user.createdAt
+        createdAt: user.createdAt,
+        lastLogin: user.lastLogin
       }
     });
     
@@ -219,7 +322,7 @@ app.post('/api/users/sync', validateUserData, async (req, res) => {
   }
 });
 
-// Get user by ID
+// Get user by ID with verified data
 app.get('/api/users/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
@@ -238,7 +341,7 @@ app.get('/api/users/:userId', async (req, res) => {
         name: user.name,
         email: user.email,
         photo: user.photo,
-        role: user.role,
+        role: user.role, // Actual database role
         isActive: user.isActive,
         createdAt: user.createdAt,
         lastLogin: user.lastLogin
@@ -250,8 +353,27 @@ app.get('/api/users/:userId', async (req, res) => {
   }
 });
 
+// Verify user role endpoint - for frontend to check against localStorage
+app.post('/api/users/verify-role', validateAndVerifyUser, async (req, res) => {
+  try {
+    res.json({
+      verified: true,
+      user: {
+        id: req.user.id,
+        name: req.user.name,
+        email: req.user.email,
+        role: req.user.role, // Verified database role
+        photo: req.user.photo
+      }
+    });
+  } catch (error) {
+    console.error('Error verifying user role:', error);
+    res.status(500).json({ error: 'Failed to verify user role' });
+  }
+});
+
 // Get all users (admin only)
-app.get('/api/users', validateUserData, requireRole(USER_ROLES.ADMIN), async (req, res) => {
+app.get('/api/users', validateAndVerifyUser, requireRole(USER_ROLES.ADMIN), async (req, res) => {
   try {
     const database = client.db(DB_NAME);
     const users = database.collection(USERS_COLLECTION);
@@ -276,13 +398,18 @@ app.get('/api/users', validateUserData, requireRole(USER_ROLES.ADMIN), async (re
 });
 
 // Update user role (admin only)
-app.put('/api/users/:userId/role', validateUserData, requireRole(USER_ROLES.ADMIN), async (req, res) => {
+app.put('/api/users/:userId/role', validateAndVerifyUser, requireRole(USER_ROLES.ADMIN), async (req, res) => {
   try {
     const { userId } = req.params;
     const { role } = req.body;
 
     if (role === undefined || ![USER_ROLES.USER, USER_ROLES.EDITOR, USER_ROLES.ADMIN].includes(role)) {
       return res.status(400).json({ error: 'Invalid role' });
+    }
+
+    // Prevent self-demotion
+    if (userId === req.user.id && role < USER_ROLES.ADMIN) {
+      return res.status(400).json({ error: 'Cannot demote yourself from admin role' });
     }
 
     const database = client.db(DB_NAME);
@@ -297,6 +424,9 @@ app.put('/api/users/:userId/role', validateUserData, requireRole(USER_ROLES.ADMI
       return res.status(404).json({ error: 'User not found' });
     }
 
+    // Update cache
+    userRoleCache.set(userId, role);
+
     res.json({ 
       message: 'User role updated successfully',
       userId: userId,
@@ -309,7 +439,7 @@ app.put('/api/users/:userId/role', validateUserData, requireRole(USER_ROLES.ADMI
 });
 
 // =============================================
-// REPORTS API ROUTES
+// SECURE REPORTS API ROUTES
 // =============================================
 
 // Get all reports (public)
@@ -325,10 +455,10 @@ app.get('/api/reports', async (req, res) => {
   }
 });
 
-// Submit new report (supports both authenticated and anonymous users)
-app.post('/api/reports', async (req, res) => {
+// Submit new report (with verified user data when available)
+app.post('/api/reports', validateUserDataOptional, async (req, res) => {
   try {
-    const { type, location, coordinates, description, severity, email, phone, userData } = req.body;
+    const { type, location, coordinates, description, severity, email, phone } = req.body;
     
     if (!type || !location || !description) {
       return res.status(400).json({ error: 'Missing required fields' });
@@ -337,19 +467,14 @@ app.post('/api/reports', async (req, res) => {
     const database = client.db(DB_NAME);
     const reports = database.collection(REPORTS_COLLECTION);
     
-    // Extract user info if provided
+    // Use verified user info if available
     let userInfo = {};
-    if (userData) {
-      try {
-        const user = typeof userData === 'string' ? JSON.parse(userData) : userData;
-        userInfo = {
-          userId: user.id,
-          userEmail: user.email,
-          userName: user.name
-        };
-      } catch (error) {
-        console.log('Invalid user data, submitting as anonymous');
-      }
+    if (req.user) {
+      userInfo = {
+        userId: req.user.id,
+        userEmail: req.user.email,
+        userName: req.user.name
+      };
     }
     
     const newReport = {
@@ -379,8 +504,8 @@ app.post('/api/reports', async (req, res) => {
   }
 });
 
-// Get user's own reports
-app.get('/api/my-reports', validateUserData, async (req, res) => {
+// Get user's own reports (with verified user)
+app.get('/api/my-reports', validateAndVerifyUser, async (req, res) => {
   try {
     const database = client.db(DB_NAME);
     const reports = database.collection(REPORTS_COLLECTION);
@@ -395,8 +520,8 @@ app.get('/api/my-reports', validateUserData, async (req, res) => {
   }
 });
 
-// Update report status (editor and admin only)
-app.put('/api/reports/:id', validateUserData, requireRole(USER_ROLES.EDITOR), async (req, res) => {
+// Update report status (editor and admin only) - USES VERIFIED ROLE
+app.put('/api/reports/:id', validateAndVerifyUser, requireRole(USER_ROLES.EDITOR), async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
@@ -430,8 +555,8 @@ app.put('/api/reports/:id', validateUserData, requireRole(USER_ROLES.EDITOR), as
   }
 });
 
-// Delete report (admin only)
-app.delete('/api/reports/:id', validateUserData, requireRole(USER_ROLES.ADMIN), async (req, res) => {
+// Delete report (admin only) - USES VERIFIED ROLE
+app.delete('/api/reports/:id', validateAndVerifyUser, requireRole(USER_ROLES.ADMIN), async (req, res) => {
   try {
     const { id } = req.params;
     const database = client.db(DB_NAME);
@@ -451,7 +576,7 @@ app.delete('/api/reports/:id', validateUserData, requireRole(USER_ROLES.ADMIN), 
 });
 
 // =============================================
-// COORDINATES API ROUTES
+// SECURE COORDINATES API ROUTES
 // =============================================
 
 // Get all coordinates (public)
@@ -467,10 +592,10 @@ app.get('/api/coordinates', async (req, res) => {
   }
 });
 
-// Submit new coordinates
-app.post('/api/coordinates', async (req, res) => {
+// Submit new coordinates (with verified user when available)
+app.post('/api/coordinates', validateUserDataOptional, async (req, res) => {
   try {
-    const { name, lat, lng, transparency, temperature, conductivity, waterlevel, pathogens, description, userData } = req.body;
+    const { name, lat, lng, transparency, temperature, conductivity, waterlevel, pathogens, description } = req.body;
     
     if (!name || !lat || !lng) {
       return res.status(400).json({ error: 'Missing required fields: name, lat, lng' });
@@ -479,19 +604,14 @@ app.post('/api/coordinates', async (req, res) => {
     const database = client.db(DB_NAME);
     const coordinates = database.collection(COORDINATES_COLLECTION);
     
-    // Extract user info if provided
+    // Use verified user info if available
     let userInfo = {};
-    if (userData) {
-      try {
-        const user = typeof userData === 'string' ? JSON.parse(userData) : userData;
-        userInfo = {
-          userId: user.id,
-          userEmail: user.email,
-          userName: user.name
-        };
-      } catch (error) {
-        console.log('Invalid user data, submitting as anonymous');
-      }
+    if (req.user) {
+      userInfo = {
+        userId: req.user.id,
+        userEmail: req.user.email,
+        userName: req.user.name
+      };
     }
     
     const newCoordinate = {
@@ -524,11 +644,11 @@ app.post('/api/coordinates', async (req, res) => {
 });
 
 // =============================================
-// POSTS API ROUTES
+// SECURE POSTS API ROUTES
 // =============================================
 
-// Get all posts (editor and admin only)
-app.get('/api/posts', validateUserData, requireRole(USER_ROLES.EDITOR), async (req, res) => {
+// Get all posts (editor and admin only) - USES VERIFIED ROLE
+app.get('/api/posts', validateAndVerifyUser, requireRole(USER_ROLES.EDITOR), async (req, res) => {
   try {
     const database = client.db(DB_NAME);
     const posts = database.collection(POSTS_COLLECTION);
@@ -553,8 +673,8 @@ app.get('/api/posts/feed', async (req, res) => {
   }
 });
 
-// Create new post (editor and admin only)
-app.post('/api/posts', validateUserData, requireRole(USER_ROLES.EDITOR), async (req, res) => {
+// Create new post (editor and admin only) - USES VERIFIED ROLE
+app.post('/api/posts', validateAndVerifyUser, requireRole(USER_ROLES.EDITOR), async (req, res) => {
   try {
     const { title, content, image, category } = req.body;
     
@@ -570,7 +690,7 @@ app.post('/api/posts', validateUserData, requireRole(USER_ROLES.EDITOR), async (
       content,
       image: image || '',
       category: category || 'general',
-      status: req.user.role === USER_ROLES.ADMIN ? 'approved' : 'pending',
+      status: req.user.role === USER_ROLES.ADMIN ? 'approved' : 'pending', // Use verified role
       authorId: req.user.id,
       authorName: req.user.name,
       authorEmail: req.user.email,
@@ -591,8 +711,8 @@ app.post('/api/posts', validateUserData, requireRole(USER_ROLES.EDITOR), async (
   }
 });
 
-// Update post status (editor and admin only)
-app.put('/api/posts/:id/status', validateUserData, requireRole(USER_ROLES.EDITOR), async (req, res) => {
+// Update post status (editor and admin only) - USES VERIFIED ROLE
+app.put('/api/posts/:id/status', validateAndVerifyUser, requireRole(USER_ROLES.EDITOR), async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
@@ -630,8 +750,8 @@ app.put('/api/posts/:id/status', validateUserData, requireRole(USER_ROLES.EDITOR
 // ADMIN DASHBOARD ROUTES
 // =============================================
 
-// Get dashboard stats (admin only)
-app.get('/api/admin/stats', validateUserData, requireRole(USER_ROLES.ADMIN), async (req, res) => {
+// Get dashboard stats (admin only) - USES VERIFIED ROLE
+app.get('/api/admin/stats', validateAndVerifyUser, requireRole(USER_ROLES.ADMIN), async (req, res) => {
   try {
     const database = client.db(DB_NAME);
     
@@ -670,7 +790,8 @@ app.get('/health', async (req, res) => {
       status: 'OK', 
       timestamp: new Date().toISOString(),
       database: 'Connected to MongoDB Atlas',
-      auth: 'Simple user role system (0=user, 1=editor, 2=admin)',
+      auth: 'Secure user role system (0=user, 1=editor, 2=admin)',
+      security: 'Database-verified roles',
       environment: process.env.NODE_ENV || 'development'
     });
   } catch (error) {
@@ -687,9 +808,10 @@ app.get('/health', async (req, res) => {
 app.get('/', (req, res) => {
   res.json({ 
     message: 'SKO GeoHydro Portal API',
-    version: '1.0.0',
+    version: '1.1.0', // Version bump for security fixes
     database: 'MongoDB Atlas',
-    auth: 'Simple User Role System',
+    auth: 'Secure User Role System with Database Verification',
+    security: 'All roles verified against database',
     user_roles: {
       '0': 'Regular User',
       '1': 'Editor',
@@ -698,30 +820,31 @@ app.get('/', (req, res) => {
     timestamp: new Date().toISOString(),
     endpoints: {
       users: [
-        'POST /api/users/sync (send userData in body)',
+        'POST /api/users/sync (returns actual database role)',
         'GET  /api/users/:userId',
+        'POST /api/users/verify-role (security endpoint)',
         'GET  /api/users (admin only)',
         'PUT  /api/users/:userId/role (admin only)'
       ],
       reports: [
         'GET  /api/reports (public)',
-        'POST /api/reports (include userData for authenticated)',
-        'GET  /api/my-reports (send userData)',
-        'PUT  /api/reports/:id (editor+ only)',
-        'DELETE /api/reports/:id (admin only)'
+        'POST /api/reports (uses verified user when available)',
+        'GET  /api/my-reports (verified user required)',
+        'PUT  /api/reports/:id (verified editor+ only)',
+        'DELETE /api/reports/:id (verified admin only)'
       ],
       coordinates: [
         'GET  /api/coordinates (public)',
-        'POST /api/coordinates (include userData for authenticated)'
+        'POST /api/coordinates (uses verified user when available)'
       ],
       posts: [
         'GET  /api/posts/feed (public)',
-        'GET  /api/posts (editor+ only)',
-        'POST /api/posts (editor+ only)',
-        'PUT  /api/posts/:id/status (editor+ only)'
+        'GET  /api/posts (verified editor+ only)',
+        'POST /api/posts (verified editor+ only)',
+        'PUT  /api/posts/:id/status (verified editor+ only)'
       ],
       admin: [
-        'GET  /api/admin/stats (admin only)'
+        'GET  /api/admin/stats (verified admin only)'
       ]
     }
   });
@@ -754,10 +877,12 @@ process.on('SIGINT', async () => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📁 Connected to MongoDB Atlas: hackathon-data.uo8k8xi.mongodb.net`);
-  console.log(`👤 User Role System: 0=User, 1=Editor, 2=Admin`);
+  console.log(`👤 SECURE User Role System: 0=User, 1=Editor, 2=Admin`);
+  console.log(`🔒 Security: Database-verified roles enabled`);
   console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`📊 Database: ${DB_NAME}`);
   console.log(`🔑 User sync: POST http://0.0.0.0:${PORT}/api/users/sync`);
+  console.log(`🔐 Role verification: POST http://0.0.0.0:${PORT}/api/users/verify-role`);
   console.log(`📋 Public reports: GET http://0.0.0.0:${PORT}/api/reports`);
   console.log(`🏥 Health check: http://0.0.0.0:${PORT}/health`);
 });
