@@ -1,10 +1,6 @@
 const express = require('express');
 const cors = require('cors');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
-const passport = require('passport');
-const GoogleStrategy = require('passport-google-oauth20').Strategy;
-const jwt = require('jsonwebtoken');
-const bcrypt = require('bcryptjs');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -13,10 +9,9 @@ const PORT = process.env.PORT || 3001;
 // MIDDLEWARE CONFIGURATION
 // =============================================
 
-// Enhanced CORS configuration for cross-domain
+// Enhanced CORS configuration
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
     
     const allowedOrigins = [
@@ -44,47 +39,66 @@ app.options('*', cors());
 // Body parser middleware
 app.use(express.json({ limit: '50mb' }));
 
-// Initialize Passport (without sessions)
-app.use(passport.initialize());
-
 // =============================================
-// JWT CONFIGURATION
+// SIMPLE USER ROLE SYSTEM
 // =============================================
 
-const JWT_SECRET = process.env.JWT_SECRET || 'fallback-jwt-secret-change-in-production';
-const JWT_EXPIRES_IN = '7d'; // Token expires in 7 days
+// User roles: 0 = regular user, 1 = editor, 2 = admin
+const USER_ROLES = {
+  USER: 0,
+  EDITOR: 1,
+  ADMIN: 2
+};
 
-// JWT token generation function
-function generateToken(user) {
-  const payload = {
-    userId: user._id.toString(),
-    email: user.email,
-    name: user.name,
-    role: user.role,
-    photo: user.photo
-  };
+// Middleware to validate user data from frontend
+const validateUserData = (req, res, next) => {
+  const userData = req.body.userData || req.headers['user-data'];
   
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
-}
-
-// JWT verification middleware
-const verifyToken = (req, res, next) => {
-  const authHeader = req.headers.authorization;
-  
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Access token required' });
+  if (!userData) {
+    return res.status(400).json({ error: 'User data required' });
   }
-  
-  const token = authHeader.split(' ')[1];
   
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded;
+    const user = typeof userData === 'string' ? JSON.parse(userData) : userData;
+    
+    // Validate required fields
+    if (!user.id || !user.email || !user.name) {
+      return res.status(400).json({ error: 'User data must contain id, email, and name' });
+    }
+    
+    // Set default role if not provided
+    if (user.role === undefined) {
+      user.role = USER_ROLES.USER;
+    }
+    
+    // Validate role
+    if (![USER_ROLES.USER, USER_ROLES.EDITOR, USER_ROLES.ADMIN].includes(user.role)) {
+      return res.status(400).json({ error: 'Invalid user role' });
+    }
+    
+    req.user = user;
     next();
   } catch (error) {
-    console.error('JWT verification error:', error);
-    return res.status(401).json({ error: 'Invalid or expired token' });
+    console.error('Error parsing user data:', error);
+    return res.status(400).json({ error: 'Invalid user data format' });
   }
+};
+
+// Middleware to check user role
+const requireRole = (minRole) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ error: 'User data required' });
+    }
+    
+    if (req.user.role < minRole) {
+      return res.status(403).json({ 
+        error: `Insufficient permissions. Required role: ${minRole}, your role: ${req.user.role}` 
+      });
+    }
+    
+    next();
+  };
 };
 
 // =============================================
@@ -125,61 +139,56 @@ async function connectToDatabase() {
 connectToDatabase();
 
 // =============================================
-// PASSPORT GOOGLE OAUTH STRATEGY (JWT VERSION)
+// USER MANAGEMENT ROUTES
 // =============================================
 
-passport.use(new GoogleStrategy({
-  clientID: process.env.GOOGLE_CLIENT_ID,
-  clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-  callbackURL: `${process.env.BACKEND_URL || 'http://localhost:3001'}/auth/google/callback`,
-  passReqToCallback: true
-}, async (req, accessToken, refreshToken, profile, done) => {
+// Create or update user from frontend data
+app.post('/api/users/sync', validateUserData, async (req, res) => {
   try {
-    console.log('Google OAuth profile received:', profile.displayName);
-    
     const database = client.db(DB_NAME);
     const users = database.collection(USERS_COLLECTION);
     
-    let user = await users.findOne({ 
+    const { id, email, name, photo, role = USER_ROLES.USER } = req.user;
+    
+    // Check if user already exists
+    const existingUser = await users.findOne({ 
       $or: [
-        { googleId: profile.id },
-        { email: profile.emails[0].value }
+        { id: id },
+        { email: email.toLowerCase() }
       ]
     });
     
-    if (user) {
-      console.log('Existing user found:', user.email);
-      
-      if (!user.googleId) {
-        await users.updateOne(
-          { _id: user._id },
-          { $set: { googleId: profile.id } }
-        );
-        user.googleId = profile.id;
-      }
-      
+    let user;
+    
+    if (existingUser) {
+      // Update existing user
       await users.updateOne(
-        { _id: user._id },
+        { id: id },
         { 
           $set: { 
+            name: name,
+            email: email.toLowerCase(),
+            photo: photo,
             lastLogin: new Date(),
-            name: profile.displayName,
-            photo: profile.photos[0].value
-          } 
-        }
+            updatedAt: new Date()
+          },
+          $setOnInsert: {
+            createdAt: new Date()
+          }
+        },
+        { upsert: true }
       );
       
-      // Return the updated user
-      const updatedUser = await users.findOne({ _id: user._id });
-      return done(null, updatedUser);
+      user = await users.findOne({ id: id });
+      console.log('Updated existing user:', email);
     } else {
-      console.log('Creating new user for:', profile.emails[0].value);
+      // Create new user
       const newUser = {
-        googleId: profile.id,
-        name: profile.displayName,
-        email: profile.emails[0].value,
-        photo: profile.photos[0].value,
-        role: 'user',
+        id: id,
+        email: email.toLowerCase(),
+        name: name,
+        photo: photo || '',
+        role: role,
         isActive: true,
         createdAt: new Date(),
         lastLogin: new Date()
@@ -187,197 +196,120 @@ passport.use(new GoogleStrategy({
       
       const result = await users.insertOne(newUser);
       newUser._id = result.insertedId;
-      console.log('New user created successfully');
-      return done(null, newUser);
-    }
-  } catch (error) {
-    console.error('Error in Google Strategy:', error);
-    return done(error, null);
-  }
-}));
-
-// =============================================
-// AUTHENTICATION MIDDLEWARE (JWT VERSION)
-// =============================================
-
-// Check if user is authenticated
-const requireAuth = (req, res, next) => {
-  verifyToken(req, res, next);
-};
-
-// Check if user is admin
-const requireAdmin = (req, res, next) => {
-  verifyToken(req, res, (err) => {
-    if (err) return next(err);
-    
-    if (req.user.role === 'admin') {
-      return next();
-    }
-    res.status(403).json({ error: 'Admin access required' });
-  });
-};
-
-// =============================================
-// AUTHENTICATION ROUTES (JWT VERSION)
-// =============================================
-
-// Start Google OAuth flow
-app.get('/auth/google',
-  passport.authenticate('google', { 
-    scope: ['profile', 'email'],
-    session: false // No sessions
-  })
-);
-
-// Google OAuth callback with JWT
-app.get('/auth/google/callback', 
-  passport.authenticate('google', { session: false }),
-  (req, res) => {
-    try {
-      console.log('OAuth callback successful for user:', req.user.email);
-      
-      // Generate JWT token
-      const token = generateToken(req.user);
-      
-      // Construct redirect URL with token
-      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-      const redirectUrl = `${frontendUrl}/auth/success?token=${encodeURIComponent(token)}&user=${encodeURIComponent(JSON.stringify({
-        id: req.user._id,
-        name: req.user.name,
-        email: req.user.email,
-        photo: req.user.photo,
-        role: req.user.role
-      }))}`;
-      
-      console.log('Redirecting to:', redirectUrl);
-      res.redirect(redirectUrl);
-    } catch (error) {
-      console.error('Error in OAuth callback:', error);
-      const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-      res.redirect(`${frontendUrl}/login?error=auth_failed`);
-    }
-  }
-);
-
-// Get current user info (JWT version)
-app.get('/auth/user', verifyToken, async (req, res) => {
-  try {
-    const database = client.db(DB_NAME);
-    const users = database.collection(USERS_COLLECTION);
-    
-    const user = await users.findOne({ _id: new ObjectId(req.user.userId) });
-    
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+      user = newUser;
+      console.log('Created new user:', email);
     }
     
-    res.json({ 
+    res.json({
+      message: 'User synced successfully',
       user: {
-        id: user._id,
-        googleId: user.googleId,
+        id: user.id,
         name: user.name,
         email: user.email,
         photo: user.photo,
         role: user.role,
-        isActive: user.isActive
-      },
-      isAuthenticated: true
+        isActive: user.isActive,
+        createdAt: user.createdAt
+      }
     });
+    
   } catch (error) {
-    console.error('Error fetching user:', error);
-    res.status(500).json({ error: 'Failed to fetch user data' });
+    console.error('Error syncing user:', error);
+    res.status(500).json({ error: 'Failed to sync user' });
   }
 });
 
-// Token validation endpoint
-app.post('/auth/validate', verifyToken, (req, res) => {
-  res.json({ 
-    valid: true,
-    user: req.user
-  });
-});
-
-// Token refresh endpoint
-app.post('/auth/refresh', verifyToken, async (req, res) => {
+// Get user by ID
+app.get('/api/users/:userId', async (req, res) => {
   try {
+    const { userId } = req.params;
     const database = client.db(DB_NAME);
     const users = database.collection(USERS_COLLECTION);
     
-    const user = await users.findOne({ _id: new ObjectId(req.user.userId) });
+    const user = await users.findOne({ id: userId });
     
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
     
-    // Generate new token
-    const newToken = generateToken(user);
-    
-    res.json({ 
-      token: newToken,
+    res.json({
       user: {
-        id: user._id,
+        id: user.id,
         name: user.name,
         email: user.email,
         photo: user.photo,
-        role: user.role
+        role: user.role,
+        isActive: user.isActive,
+        createdAt: user.createdAt,
+        lastLogin: user.lastLogin
       }
     });
   } catch (error) {
-    console.error('Error refreshing token:', error);
-    res.status(500).json({ error: 'Failed to refresh token' });
+    console.error('Error fetching user:', error);
+    res.status(500).json({ error: 'Failed to fetch user' });
   }
 });
 
-// Manual login endpoint (for testing)
-app.post('/auth/login', async (req, res) => {
+// Get all users (admin only)
+app.get('/api/users', validateUserData, requireRole(USER_ROLES.ADMIN), async (req, res) => {
   try {
-    const { email, password } = req.body;
-    
-    // This is a simplified version - you might want to implement proper password auth
-    // For now, we'll just generate a token for any existing user
     const database = client.db(DB_NAME);
     const users = database.collection(USERS_COLLECTION);
+    const allUsers = await users.find({}).sort({ createdAt: -1 }).toArray();
     
-    const user = await users.findOne({ email });
+    const safeUsers = allUsers.map(user => ({
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      photo: user.photo,
+      role: user.role,
+      isActive: user.isActive,
+      createdAt: user.createdAt,
+      lastLogin: user.lastLogin
+    }));
     
-    if (!user) {
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-    
-    const token = generateToken(user);
-    
-    res.json({
-      token,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        photo: user.photo,
-        role: user.role
-      }
-    });
+    res.json(safeUsers);
   } catch (error) {
-    console.error('Login error:', error);
-    res.status(500).json({ error: 'Login failed' });
+    console.error('Error fetching users:', error);
+    res.status(500).json({ error: 'Failed to fetch users' });
   }
 });
 
-// Logout user (JWT version - client-side token removal)
-app.post('/auth/logout', (req, res) => {
-  // With JWT, logout is handled client-side by removing the token
-  res.json({ message: 'Logged out successfully - remove token client-side' });
-});
+// Update user role (admin only)
+app.put('/api/users/:userId/role', validateUserData, requireRole(USER_ROLES.ADMIN), async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { role } = req.body;
 
-// Check auth status
-app.get('/auth/status', verifyToken, (req, res) => {
-  res.json({ 
-    isAuthenticated: true,
-    user: req.user
-  });
+    if (role === undefined || ![USER_ROLES.USER, USER_ROLES.EDITOR, USER_ROLES.ADMIN].includes(role)) {
+      return res.status(400).json({ error: 'Invalid role' });
+    }
+
+    const database = client.db(DB_NAME);
+    const users = database.collection(USERS_COLLECTION);
+
+    const result = await users.updateOne(
+      { id: userId },
+      { $set: { role: role, updatedAt: new Date() } }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({ 
+      message: 'User role updated successfully',
+      userId: userId,
+      newRole: role
+    });
+  } catch (error) {
+    console.error('Error updating user role:', error);
+    res.status(500).json({ error: 'Failed to update user role' });
+  }
 });
 
 // =============================================
-// REPORTS API ROUTES (UPDATED FOR JWT)
+// REPORTS API ROUTES
 // =============================================
 
 // Get all reports (public)
@@ -396,7 +328,7 @@ app.get('/api/reports', async (req, res) => {
 // Submit new report (supports both authenticated and anonymous users)
 app.post('/api/reports', async (req, res) => {
   try {
-    const { type, location, coordinates, description, severity, email, phone } = req.body;
+    const { type, location, coordinates, description, severity, email, phone, userData } = req.body;
     
     if (!type || !location || !description) {
       return res.status(400).json({ error: 'Missing required fields' });
@@ -405,22 +337,18 @@ app.post('/api/reports', async (req, res) => {
     const database = client.db(DB_NAME);
     const reports = database.collection(REPORTS_COLLECTION);
     
-    // Extract user from token if provided
+    // Extract user info if provided
     let userInfo = {};
-    const authHeader = req.headers.authorization;
-    
-    if (authHeader && authHeader.startsWith('Bearer ')) {
+    if (userData) {
       try {
-        const token = authHeader.split(' ')[1];
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const user = typeof userData === 'string' ? JSON.parse(userData) : userData;
         userInfo = {
-          userId: decoded.userId,
-          userEmail: decoded.email,
-          userName: decoded.name
+          userId: user.id,
+          userEmail: user.email,
+          userName: user.name
         };
       } catch (error) {
-        // Token is invalid, proceed as anonymous
-        console.log('Invalid token, submitting as anonymous');
+        console.log('Invalid user data, submitting as anonymous');
       }
     }
     
@@ -451,13 +379,13 @@ app.post('/api/reports', async (req, res) => {
   }
 });
 
-// Get user's own reports (requires authentication)
-app.get('/api/my-reports', requireAuth, async (req, res) => {
+// Get user's own reports
+app.get('/api/my-reports', validateUserData, async (req, res) => {
   try {
     const database = client.db(DB_NAME);
     const reports = database.collection(REPORTS_COLLECTION);
     const userReports = await reports.find({ 
-      userId: req.user.userId
+      userId: req.user.id
     }).sort({ createdAt: -1 }).toArray();
     
     res.json(userReports);
@@ -467,9 +395,8 @@ app.get('/api/my-reports', requireAuth, async (req, res) => {
   }
 });
 
-// [Keep all other report routes the same, just update requireAuth to use JWT version]
-// Update report status
-app.put('/api/reports/:id', async (req, res) => {
+// Update report status (editor and admin only)
+app.put('/api/reports/:id', validateUserData, requireRole(USER_ROLES.EDITOR), async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
@@ -486,7 +413,8 @@ app.put('/api/reports/:id', async (req, res) => {
       { 
         $set: { 
           status: status,
-          updatedAt: new Date()
+          updatedAt: new Date(),
+          updatedBy: req.user.id
         } 
       }
     );
@@ -502,8 +430,8 @@ app.put('/api/reports/:id', async (req, res) => {
   }
 });
 
-// Delete report
-app.delete('/api/reports/:id', async (req, res) => {
+// Delete report (admin only)
+app.delete('/api/reports/:id', validateUserData, requireRole(USER_ROLES.ADMIN), async (req, res) => {
   try {
     const { id } = req.params;
     const database = client.db(DB_NAME);
@@ -523,10 +451,10 @@ app.delete('/api/reports/:id', async (req, res) => {
 });
 
 // =============================================
-// COORDINATES API ROUTES (UPDATED FOR JWT)
+// COORDINATES API ROUTES
 // =============================================
 
-// Get all coordinates
+// Get all coordinates (public)
 app.get('/api/coordinates', async (req, res) => {
   try {
     const database = client.db(DB_NAME);
@@ -542,7 +470,7 @@ app.get('/api/coordinates', async (req, res) => {
 // Submit new coordinates
 app.post('/api/coordinates', async (req, res) => {
   try {
-    const { name, lat, lng, transparency, temperature, conductivity, waterlevel, pathogens, description } = req.body;
+    const { name, lat, lng, transparency, temperature, conductivity, waterlevel, pathogens, description, userData } = req.body;
     
     if (!name || !lat || !lng) {
       return res.status(400).json({ error: 'Missing required fields: name, lat, lng' });
@@ -551,22 +479,18 @@ app.post('/api/coordinates', async (req, res) => {
     const database = client.db(DB_NAME);
     const coordinates = database.collection(COORDINATES_COLLECTION);
     
-    // Extract user from token if provided
+    // Extract user info if provided
     let userInfo = {};
-    const authHeader = req.headers.authorization;
-    
-    if (authHeader && authHeader.startsWith('Bearer ')) {
+    if (userData) {
       try {
-        const token = authHeader.split(' ')[1];
-        const decoded = jwt.verify(token, JWT_SECRET);
+        const user = typeof userData === 'string' ? JSON.parse(userData) : userData;
         userInfo = {
-          userId: decoded.userId,
-          userEmail: decoded.email,
-          userName: decoded.name
+          userId: user.id,
+          userEmail: user.email,
+          userName: user.name
         };
       } catch (error) {
-        // Token is invalid, proceed as anonymous
-        console.log('Invalid token, submitting as anonymous');
+        console.log('Invalid user data, submitting as anonymous');
       }
     }
     
@@ -599,14 +523,12 @@ app.post('/api/coordinates', async (req, res) => {
   }
 });
 
-// [Keep all other coordinate routes the same...]
-
 // =============================================
-// POSTS API ROUTES (UPDATED FOR JWT)
+// POSTS API ROUTES
 // =============================================
 
-// Get all posts (for admin)
-app.get('/api/posts', async (req, res) => {
+// Get all posts (editor and admin only)
+app.get('/api/posts', validateUserData, requireRole(USER_ROLES.EDITOR), async (req, res) => {
   try {
     const database = client.db(DB_NAME);
     const posts = database.collection(POSTS_COLLECTION);
@@ -618,7 +540,7 @@ app.get('/api/posts', async (req, res) => {
   }
 });
 
-// Get approved posts for feed
+// Get approved posts for feed (public)
 app.get('/api/posts/feed', async (req, res) => {
   try {
     const database = client.db(DB_NAME);
@@ -631,64 +553,108 @@ app.get('/api/posts/feed', async (req, res) => {
   }
 });
 
-// [Keep all other post routes the same, just update authentication to use JWT where needed]
-
-// =============================================
-// USER MANAGEMENT ROUTES (UPDATED FOR JWT)
-// =============================================
-
-// Get all users (admin only)
-app.get('/api/users', requireAdmin, async (req, res) => {
+// Create new post (editor and admin only)
+app.post('/api/posts', validateUserData, requireRole(USER_ROLES.EDITOR), async (req, res) => {
   try {
+    const { title, content, image, category } = req.body;
+    
+    if (!title || !content) {
+      return res.status(400).json({ error: 'Title and content are required' });
+    }
+
     const database = client.db(DB_NAME);
-    const users = database.collection(USERS_COLLECTION);
-    const allUsers = await users.find({}).sort({ createdAt: -1 }).toArray();
+    const posts = database.collection(POSTS_COLLECTION);
     
-    // Remove sensitive data
-    const safeUsers = allUsers.map(user => ({
-      id: user._id,
-      name: user.name,
-      email: user.email,
-      photo: user.photo,
-      role: user.role,
-      isActive: user.isActive,
-      createdAt: user.createdAt,
-      lastLogin: user.lastLogin
-    }));
-    
-    res.json(safeUsers);
+    const newPost = {
+      title,
+      content,
+      image: image || '',
+      category: category || 'general',
+      status: req.user.role === USER_ROLES.ADMIN ? 'approved' : 'pending',
+      authorId: req.user.id,
+      authorName: req.user.name,
+      authorEmail: req.user.email,
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+
+    const result = await posts.insertOne(newPost);
+    newPost._id = result.insertedId;
+
+    res.status(201).json({ 
+      message: 'Post created successfully',
+      post: newPost 
+    });
   } catch (error) {
-    console.error('Error fetching users:', error);
-    res.status(500).json({ error: 'Failed to fetch users' });
+    console.error('Error creating post:', error);
+    res.status(500).json({ error: 'Failed to create post' });
   }
 });
 
-// Update user role (admin only)
-app.put('/api/users/:id/role', requireAdmin, async (req, res) => {
+// Update post status (editor and admin only)
+app.put('/api/posts/:id/status', validateUserData, requireRole(USER_ROLES.EDITOR), async (req, res) => {
   try {
     const { id } = req.params;
-    const { role } = req.body;
+    const { status } = req.body;
 
-    if (!role || !['user', 'admin', 'moderator'].includes(role)) {
-      return res.status(400).json({ error: 'Invalid role' });
+    if (!status || !['pending', 'approved', 'rejected'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid status' });
     }
 
     const database = client.db(DB_NAME);
-    const users = database.collection(USERS_COLLECTION);
+    const posts = database.collection(POSTS_COLLECTION);
 
-    const result = await users.updateOne(
+    const result = await posts.updateOne(
       { _id: new ObjectId(id) },
-      { $set: { role: role, updatedAt: new Date() } }
+      { 
+        $set: { 
+          status: status,
+          updatedAt: new Date(),
+          reviewedBy: req.user.id
+        } 
+      }
     );
 
     if (result.matchedCount === 0) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ error: 'Post not found' });
     }
 
-    res.json({ message: 'User role updated successfully' });
+    res.json({ message: 'Post status updated successfully' });
   } catch (error) {
-    console.error('Error updating user role:', error);
-    res.status(500).json({ error: 'Failed to update user role' });
+    console.error('Error updating post status:', error);
+    res.status(500).json({ error: 'Failed to update post status' });
+  }
+});
+
+// =============================================
+// ADMIN DASHBOARD ROUTES
+// =============================================
+
+// Get dashboard stats (admin only)
+app.get('/api/admin/stats', validateUserData, requireRole(USER_ROLES.ADMIN), async (req, res) => {
+  try {
+    const database = client.db(DB_NAME);
+    
+    const usersCount = await database.collection(USERS_COLLECTION).countDocuments();
+    const reportsCount = await database.collection(REPORTS_COLLECTION).countDocuments();
+    const coordinatesCount = await database.collection(COORDINATES_COLLECTION).countDocuments();
+    const postsCount = await database.collection(POSTS_COLLECTION).countDocuments();
+    
+    const pendingReports = await database.collection(REPORTS_COLLECTION).countDocuments({ status: 'pending' });
+    const pendingPosts = await database.collection(POSTS_COLLECTION).countDocuments({ status: 'pending' });
+    
+    res.json({
+      users: usersCount,
+      reports: reportsCount,
+      coordinates: coordinatesCount,
+      posts: postsCount,
+      pendingReports: pendingReports,
+      pendingPosts: pendingPosts,
+      lastUpdated: new Date()
+    });
+  } catch (error) {
+    console.error('Error fetching admin stats:', error);
+    res.status(500).json({ error: 'Failed to fetch admin stats' });
   }
 });
 
@@ -704,15 +670,8 @@ app.get('/health', async (req, res) => {
       status: 'OK', 
       timestamp: new Date().toISOString(),
       database: 'Connected to MongoDB Atlas',
-      auth: 'Google OAuth with JWT enabled',
-      environment: process.env.NODE_ENV || 'development',
-      envVars: {
-        hasGoogleClientId: !!process.env.GOOGLE_CLIENT_ID,
-        hasGoogleClientSecret: !!process.env.GOOGLE_CLIENT_SECRET,
-        hasJwtSecret: !!process.env.JWT_SECRET,
-        frontendUrl: process.env.FRONTEND_URL,
-        backendUrl: process.env.BACKEND_URL
-      }
+      auth: 'Simple user role system (0=user, 1=editor, 2=admin)',
+      environment: process.env.NODE_ENV || 'development'
     });
   } catch (error) {
     console.error('Health check failed:', error);
@@ -730,29 +689,39 @@ app.get('/', (req, res) => {
     message: 'SKO GeoHydro Portal API',
     version: '1.0.0',
     database: 'MongoDB Atlas',
-    auth: 'Google OAuth with JWT',
+    auth: 'Simple User Role System',
+    user_roles: {
+      '0': 'Regular User',
+      '1': 'Editor',
+      '2': 'Admin'
+    },
     timestamp: new Date().toISOString(),
     endpoints: {
-      auth: [
-        'GET  /auth/google',
-        'GET  /auth/user (JWT required)',
-        'POST /auth/validate (JWT required)',
-        'POST /auth/refresh (JWT required)',
-        'POST /auth/logout'
+      users: [
+        'POST /api/users/sync (send userData in body)',
+        'GET  /api/users/:userId',
+        'GET  /api/users (admin only)',
+        'PUT  /api/users/:userId/role (admin only)'
       ],
       reports: [
-        'GET  /api/reports',
-        'POST /api/reports',
-        'GET  /api/my-reports (JWT required)'
+        'GET  /api/reports (public)',
+        'POST /api/reports (include userData for authenticated)',
+        'GET  /api/my-reports (send userData)',
+        'PUT  /api/reports/:id (editor+ only)',
+        'DELETE /api/reports/:id (admin only)'
       ],
       coordinates: [
-        'GET  /api/coordinates',
-        'POST /api/coordinates'
+        'GET  /api/coordinates (public)',
+        'POST /api/coordinates (include userData for authenticated)'
       ],
       posts: [
-        'GET  /api/posts',
-        'GET  /api/posts/feed',
-        'POST /api/posts'
+        'GET  /api/posts/feed (public)',
+        'GET  /api/posts (editor+ only)',
+        'POST /api/posts (editor+ only)',
+        'PUT  /api/posts/:id/status (editor+ only)'
+      ],
+      admin: [
+        'GET  /api/admin/stats (admin only)'
       ]
     }
   });
@@ -785,12 +754,10 @@ process.on('SIGINT', async () => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📁 Connected to MongoDB Atlas: hackathon-data.uo8k8xi.mongodb.net`);
-  console.log(`🔐 Google OAuth with JWT: ${process.env.GOOGLE_CLIENT_ID ? 'Configured' : 'Not configured'}`);
+  console.log(`👤 User Role System: 0=User, 1=Editor, 2=Admin`);
   console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`📊 Database: ${DB_NAME}`);
-  console.log(`🔑 Auth routes:`);
-  console.log(`   - GET  http://0.0.0.0:${PORT}/auth/google`);
-  console.log(`   - GET  http://0.0.0.0:${PORT}/auth/user (JWT required)`);
-  console.log(`   - POST http://0.0.0.0:${PORT}/auth/validate`);
+  console.log(`🔑 User sync: POST http://0.0.0.0:${PORT}/api/users/sync`);
+  console.log(`📋 Public reports: GET http://0.0.0.0:${PORT}/api/reports`);
   console.log(`🏥 Health check: http://0.0.0.0:${PORT}/health`);
 });
