@@ -225,7 +225,6 @@ connectToDatabase();
 // SECURE USER MANAGEMENT ROUTES
 // =============================================
 
-// Create or update user from frontend data - RETURNS ACTUAL DATABASE ROLE
 app.post('/api/users/sync', async (req, res) => {
   try {
     const userData = req.body.userData || req.body; // Support both nested and direct
@@ -252,7 +251,7 @@ app.post('/api/users/sync', async (req, res) => {
     let isNewUser = false;
     
     if (existingUser) {
-      // Update existing user - PRESERVE DATABASE ROLE (security fix)
+      // ✅ CRITICAL FIX: PRESERVE EXISTING ROLE, don't overwrite it
       const updateData = {
         name: name,
         email: email.toLowerCase(),
@@ -261,24 +260,18 @@ app.post('/api/users/sync', async (req, res) => {
         updatedAt: new Date()
       };
       
-      // Only update role if it's a new user or role doesn't exist
-      if (!existingUser.role && userData.role !== undefined) {
-        updateData.role = Math.min(userData.role, USER_ROLES.USER); // Default to user role for security
-      }
+      // ✅ NEVER overwrite existing role from frontend data
+      // The role stays as whatever is in the database
       
       await users.updateOne(
         { id: id },
         { 
-          $set: updateData,
-          $setOnInsert: {
-            createdAt: new Date()
-          }
-        },
-        { upsert: true }
+          $set: updateData
+        }
       );
       
       user = await users.findOne({ id: id });
-      console.log('Updated existing user:', email, 'Role:', user.role);
+      console.log('✅ Updated existing user:', email, 'Role:', user.role);
     } else {
       // Create new user - SET DEFAULT USER ROLE FOR SECURITY
       const newUser = {
@@ -295,7 +288,7 @@ app.post('/api/users/sync', async (req, res) => {
       const result = await users.insertOne(newUser);
       user = { ...newUser, _id: result.insertedId };
       isNewUser = true;
-      console.log('Created new user:', email, 'with default user role');
+      console.log('✅ Created new user:', email, 'with default user role');
     }
     
     // Update cache
