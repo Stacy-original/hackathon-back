@@ -169,6 +169,194 @@ async function connectToDatabase() {
 connectToDatabase();
 
 // =============================================
+// SECURE USER MANAGEMENT ROUTES (ADMIN ONLY)
+// =============================================
+
+// Get all users (admin only)
+app.get('/api/users', validateApiKey, requireRole(USER_ROLES.ADMIN), async (req, res) => {
+  try {
+    const database = client.db(DB_NAME);
+    const users = database.collection('users');
+    const allUsers = await users.find({}).sort({ createdAt: -1 }).toArray();
+    
+    const safeUsers = allUsers.map(user => ({
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      photo: user.photo,
+      role: user.role,
+      points: user.points || 0,
+      isActive: user.isActive,
+      createdAt: user.createdAt,
+      lastLogin: user.lastLogin,
+      lastActivity: user.lastActivity
+    }));
+    
+    res.json(safeUsers);
+  } catch (error) {
+    console.error('Error fetching users:', error);
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
+});
+
+// Get user by ID (admin only)
+app.get('/api/users/:userId', validateApiKey, requireRole(USER_ROLES.ADMIN), async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const database = client.db(DB_NAME);
+    const users = database.collection('users');
+    
+    const user = await users.findOne({ id: userId });
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    res.json({
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        photo: user.photo,
+        role: user.role,
+        points: user.points || 0,
+        isActive: user.isActive,
+        createdAt: user.createdAt,
+        lastLogin: user.lastLogin,
+        lastActivity: user.lastActivity,
+        pointsHistory: user.pointsHistory || []
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching user:', error);
+    res.status(500).json({ error: 'Failed to fetch user' });
+  }
+});
+
+// Update user role (admin only)
+app.put('/api/users/:userId/role', validateApiKey, requireRole(USER_ROLES.ADMIN), async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { role } = req.body;
+
+    if (role === undefined || ![USER_ROLES.USER, USER_ROLES.EDITOR, USER_ROLES.ADMIN].includes(role)) {
+      return res.status(400).json({ error: 'Invalid role' });
+    }
+
+    const database = client.db(DB_NAME);
+    const users = database.collection('users');
+
+    const result = await users.updateOne(
+      { id: userId },
+      { $set: { role: role, updatedAt: new Date() } }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({ 
+      message: 'User role updated successfully',
+      userId: userId,
+      newRole: role
+    });
+  } catch (error) {
+    console.error('Error updating user role:', error);
+    res.status(500).json({ error: 'Failed to update user role' });
+  }
+});
+
+// Update user status (admin only)
+app.put('/api/users/:userId/status', validateApiKey, requireRole(USER_ROLES.ADMIN), async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { isActive } = req.body;
+
+    if (typeof isActive !== 'boolean') {
+      return res.status(400).json({ error: 'isActive must be a boolean' });
+    }
+
+    const database = client.db(DB_NAME);
+    const users = database.collection('users');
+
+    const result = await users.updateOne(
+      { id: userId },
+      { $set: { isActive: isActive, updatedAt: new Date() } }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({ 
+      message: `User ${isActive ? 'activated' : 'deactivated'} successfully`,
+      userId: userId,
+      isActive: isActive
+    });
+  } catch (error) {
+    console.error('Error updating user status:', error);
+    res.status(500).json({ error: 'Failed to update user status' });
+  }
+});
+
+// Delete user (admin only)
+app.delete('/api/users/:userId', validateApiKey, requireRole(USER_ROLES.ADMIN), async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const database = client.db(DB_NAME);
+    const users = database.collection('users');
+
+    const result = await users.deleteOne({ id: userId });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({ message: 'User deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting user:', error);
+    res.status(500).json({ error: 'Failed to delete user' });
+  }
+});
+
+// Get user statistics (admin only)
+app.get('/api/users/stats/overview', validateApiKey, requireRole(USER_ROLES.ADMIN), async (req, res) => {
+  try {
+    const database = client.db(DB_NAME);
+    const users = database.collection('users');
+    
+    const totalUsers = await users.countDocuments();
+    const activeUsers = await users.countDocuments({ isActive: true });
+    const adminUsers = await users.countDocuments({ role: USER_ROLES.ADMIN });
+    const editorUsers = await users.countDocuments({ role: USER_ROLES.EDITOR });
+    const regularUsers = await users.countDocuments({ role: USER_ROLES.USER });
+    
+    // Get top users by points
+    const topUsers = await users.find({ points: { $exists: true, $gt: 0 } })
+      .sort({ points: -1 })
+      .limit(5)
+      .project({ name: 1, email: 1, points: 1, lastActivity: 1 })
+      .toArray();
+
+    res.json({
+      totalUsers,
+      activeUsers,
+      roleDistribution: {
+        admin: adminUsers,
+        editor: editorUsers,
+        user: regularUsers
+      },
+      topUsers,
+      lastUpdated: new Date()
+    });
+  } catch (error) {
+    console.error('Error fetching user stats:', error);
+    res.status(500).json({ error: 'Failed to fetch user statistics' });
+  }
+});
+
+
+// =============================================
 // POINTS MANAGEMENT FUNCTIONS
 // =============================================
 
