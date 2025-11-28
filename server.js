@@ -952,6 +952,60 @@ app.post('/api/coordinates', validateApiKey, async (req, res) => {
   }
 });
 
+// Update coordinate status (editor and admin only) - ADDED
+app.put('/api/coordinates/:id', validateApiKey, requireRole(USER_ROLES.EDITOR), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!status || !['pending', 'reviewed', 'resolved'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid status' });
+    }
+
+    const database = client.db(DB_NAME);
+    const coordinates = database.collection(COORDINATES_COLLECTION);
+
+    const result = await coordinates.updateOne(
+      { _id: new ObjectId(id) },
+      { 
+        $set: { 
+          status: status,
+          updatedAt: new Date()
+        } 
+      }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: 'Coordinate not found' });
+    }
+
+    res.json({ message: 'Coordinate updated successfully' });
+  } catch (error) {
+    console.error('Error updating coordinate:', error);
+    res.status(500).json({ error: 'Failed to update coordinate' });
+  }
+});
+
+// Delete coordinate (admin only) - ADDED
+app.delete('/api/coordinates/:id', validateApiKey, requireRole(USER_ROLES.ADMIN), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const database = client.db(DB_NAME);
+    const coordinates = database.collection(COORDINATES_COLLECTION);
+
+    const result = await coordinates.deleteOne({ _id: new ObjectId(id) });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ error: 'Coordinate not found' });
+    }
+
+    res.json({ message: 'Coordinate deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting coordinate:', error);
+    res.status(500).json({ error: 'Failed to delete coordinate' });
+  }
+});
+
 // =============================================
 // SECURE POSTS API ROUTES
 // =============================================
@@ -1028,8 +1082,8 @@ app.post('/api/posts', validateApiKey, requireRole(USER_ROLES.EDITOR), async (re
   }
 });
 
-// Update post status (editor and admin only)
-app.put('/api/posts/:id/status', validateApiKey, requireRole(USER_ROLES.EDITOR), async (req, res) => {
+// Update post status (editor and admin only) - FIXED ROUTE
+app.put('/api/posts/:id', validateApiKey, requireRole(USER_ROLES.EDITOR), async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
@@ -1059,6 +1113,26 @@ app.put('/api/posts/:id/status', validateApiKey, requireRole(USER_ROLES.EDITOR),
   } catch (error) {
     console.error('Error updating post status:', error);
     res.status(500).json({ error: 'Failed to update post status' });
+  }
+});
+
+// Delete post (admin only) - ADDED
+app.delete('/api/posts/:id', validateApiKey, requireRole(USER_ROLES.ADMIN), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const database = client.db(DB_NAME);
+    const posts = database.collection(POSTS_COLLECTION);
+
+    const result = await posts.deleteOne({ _id: new ObjectId(id) });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ error: 'Post not found' });
+    }
+
+    res.json({ message: 'Post deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting post:', error);
+    res.status(500).json({ error: 'Failed to delete post' });
   }
 });
 
@@ -1590,13 +1664,16 @@ app.get('/', (req, res) => {
       ],
       coordinates: [
         'GET  /api/coordinates (API key required)',
-        'POST /api/coordinates (API key required)'
+        'POST /api/coordinates (API key required)',
+        'PUT  /api/coordinates/:id (Editor+ API key)',
+        'DELETE /api/coordinates/:id (Admin API key)'
       ],
       posts: [
         'GET  /api/posts/feed (API key required)',
         'GET  /api/posts (Editor+ API key)',
         'POST /api/posts (Editor+ API key)',
-        'PUT  /api/posts/:id/status (Editor+ API key)'
+        'PUT  /api/posts/:id (Editor+ API key)',
+        'DELETE /api/posts/:id (Admin API key)'
       ],
       comments: [
         'GET  /api/comments/:parentType/:parentId (API key required)',
