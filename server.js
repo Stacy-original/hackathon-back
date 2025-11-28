@@ -39,6 +39,31 @@ app.options('*', cors());
 // Body parser middleware
 app.use(express.json({ limit: '50mb' }));
 
+// UTF-8 encoding middleware - ADDED
+app.use((req, res, next) => {
+  // Set proper content type for responses
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  next();
+});
+
+// Helper function to fix encoding for existing data - ADDED
+function fixCyrillicEncoding(text) {
+  if (!text || typeof text !== 'string') return text;
+  
+  // Check if it looks like misencoded Cyrillic (contains common mojibake patterns)
+  const cyrillicMojibakePattern = /Ð|Ñ|Ò|Ó|Ô|Õ|Ö|×|Ø|Ù/;
+  if (cyrillicMojibakePattern.test(text)) {
+    try {
+      // Fix the encoding by converting from Latin-1 to UTF-8
+      return Buffer.from(text, 'binary').toString('utf-8');
+    } catch (e) {
+      console.warn('Failed to fix encoding for:', text);
+      return text;
+    }
+  }
+  return text;
+}
+
 // =============================================
 // API KEY SECURITY SYSTEM
 // =============================================
@@ -208,7 +233,7 @@ app.post('/api/users/sync', validateApiKey, async (req, res) => {
       // Create new user
       const newUser = {
         id: userData.id,
-        name: userData.name,
+        name: fixCyrillicEncoding(userData.name), // FIXED ENCODING
         email: userData.email,
         photo: userData.photo || '',
         role: USER_ROLES.USER, // Default role
@@ -322,7 +347,7 @@ app.post('/api/users', validateApiKey, async (req, res) => {
 
     const newUser = {
       id,
-      name,
+      name: fixCyrillicEncoding(name), // FIXED ENCODING
       email,
       photo: photo || '',
       role: role,
@@ -409,7 +434,7 @@ app.put('/api/users/:userId/profile', validateApiKey, async (req, res) => {
     const users = database.collection('users');
 
     const updateData = { updatedAt: new Date() };
-    if (name) updateData.name = name;
+    if (name) updateData.name = fixCyrillicEncoding(name); // FIXED ENCODING
     if (photo !== undefined) updateData.photo = photo;
 
     const result = await users.updateOne(
@@ -795,15 +820,15 @@ app.post('/api/reports', validateApiKey, async (req, res) => {
     
     const newReport = {
       type,
-      location,
+      location: fixCyrillicEncoding(location), // FIXED ENCODING
       coordinates: coordinates || '',
-      description,
+      description: fixCyrillicEncoding(description), // FIXED ENCODING
       severity: severity || 'medium',
       email: email || '',
       phone: phone || '',
       status: 'pending',
       userId: userId || '',
-      userName: userName || '',
+      userName: fixCyrillicEncoding(userName || ''), // FIXED ENCODING
       userEmail: userEmail || '',
       likes: 0,
       dislikes: 0,
@@ -914,7 +939,7 @@ app.post('/api/coordinates', validateApiKey, async (req, res) => {
     const coordinates = database.collection(COORDINATES_COLLECTION);
     
     const newCoordinate = {
-      name,
+      name: fixCyrillicEncoding(name), // FIXED ENCODING
       lat: parseFloat(lat),
       lng: parseFloat(lng),
       transparency: transparency ? parseFloat(transparency) : null,
@@ -922,10 +947,10 @@ app.post('/api/coordinates', validateApiKey, async (req, res) => {
       conductivity: conductivity ? parseFloat(conductivity) : null,
       waterlevel: waterlevel ? parseFloat(waterlevel) : null,
       pathogens: pathogens || 'Unknown',
-      description: description || '',
+      description: fixCyrillicEncoding(description || ''), // FIXED ENCODING
       status: 'pending',
       userId: userId || '',
-      userName: userName || '',
+      userName: fixCyrillicEncoding(userName || ''), // FIXED ENCODING
       userEmail: userEmail || '',
       likes: 0,
       dislikes: 0,
@@ -1049,13 +1074,13 @@ app.post('/api/posts', validateApiKey, requireRole(USER_ROLES.EDITOR), async (re
     const posts = database.collection(POSTS_COLLECTION);
     
     const newPost = {
-      title,
-      content,
+      title: fixCyrillicEncoding(title), // FIXED ENCODING
+      content: fixCyrillicEncoding(content), // FIXED ENCODING
       image: image || '',
       category: category || 'general',
       status: req.userRole === USER_ROLES.ADMIN ? 'approved' : 'pending',
       authorId: userId || '',
-      authorName: userName || '',
+      authorName: fixCyrillicEncoding(userName || ''), // FIXED ENCODING
       authorEmail: userEmail || '',
       likes: 0,
       dislikes: 0,
@@ -1175,9 +1200,9 @@ app.post('/api/comments', validateApiKey, async (req, res) => {
     const newComment = {
       parentType,
       parentId,
-      content,
+      content: fixCyrillicEncoding(content), // FIXED ENCODING
       userId: userId || '',
-      userName: userName || '',
+      userName: fixCyrillicEncoding(userName || ''), // FIXED ENCODING
       userEmail: userEmail || '',
       likes: 0,
       dislikes: 0,
@@ -1229,7 +1254,7 @@ app.put('/api/comments/:id', validateApiKey, async (req, res) => {
       query,
       { 
         $set: { 
-          content: content,
+          content: fixCyrillicEncoding(content), // FIXED ENCODING
           updatedAt: new Date()
         } 
       }
@@ -1407,7 +1432,7 @@ app.post('/api/reactions', validateApiKey, async (req, res) => {
         parentId,
         type,
         userId,
-        userName: userName || '',
+        userName: fixCyrillicEncoding(userName || ''), // FIXED ENCODING
         createdAt: new Date(),
         updatedAt: new Date()
       });
